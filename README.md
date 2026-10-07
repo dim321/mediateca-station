@@ -78,6 +78,21 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now mediateca-station
 ```
 
+## Docker
+
+`compose.yaml` runs this process on the Broadcast Hub Compose network
+(`mediateca_broadcast_default`) so it can call the hub the way a mini-PC
+would. Start the hub first. Copy `.env.example` to `.env`, set `AGENT_TOKEN`
+and `SCREEN_ID`, then `docker compose up --build`. The entrypoint writes a
+mode-0600 config and calls the hub container by IP, because development
+rejects the hostname `web`.
+
+`docker compose --profile tv up --build` also starts an Android TV 9 emulator
+with VLC. It needs `/dev/kvm`. The station connects to `tv:5555` and serves
+clips on the address VLC can reach. Watch the screen with
+`scrcpy -s emulator-5554`. Host adb names this published port
+`emulator-5554`, not `127.0.0.1:5555`.
+
 ## Logs
 
 ```bash

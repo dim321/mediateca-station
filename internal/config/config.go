@@ -19,6 +19,7 @@ type File struct {
 	HubBaseURL    string
 	AgentToken    string
 	HTTPListen    string
+	HTTPPublic    string
 	HTTPSecret    string
 	LateThreshold time.Duration
 	PollInterval  time.Duration
@@ -39,6 +40,7 @@ type fileYAML struct {
 	HubBaseURL    string       `yaml:"hub_base_url"`
 	AgentToken    string       `yaml:"agent_token"`
 	HTTPListen    string       `yaml:"http_listen"`
+	HTTPPublic    string       `yaml:"http_public"`
 	HTTPSecret    string       `yaml:"http_secret"`
 	LateThreshold string       `yaml:"late_threshold"`
 	PollInterval  string       `yaml:"poll_interval"`
@@ -71,6 +73,7 @@ func Load(path string) (File, error) {
 		HubBaseURL:    doc.HubBaseURL,
 		AgentToken:    doc.AgentToken,
 		HTTPListen:    doc.HTTPListen,
+		HTTPPublic:    doc.HTTPPublic,
 		HTTPSecret:    doc.HTTPSecret,
 		LateThreshold: 2 * time.Second,
 		PollInterval:  time.Minute,
@@ -119,6 +122,11 @@ func (f *File) validate(doc fileYAML) error {
 	}
 	if _, _, err := net.SplitHostPort(f.HTTPListen); err != nil {
 		return fmt.Errorf("http_listen is invalid")
+	}
+	if f.HTTPPublic != "" {
+		if _, _, err := net.SplitHostPort(f.HTTPPublic); err != nil {
+			return fmt.Errorf("http_public is invalid")
+		}
 	}
 	if len(f.HTTPSecret) < 32 {
 		return fmt.Errorf("http_secret must be at least 32 characters")

@@ -1,0 +1,103 @@
+# Debug one station process against a local Broadcast Hub.
+# The hub Compose project must already be up (service name: web, network
+# mediateca_broadcast_default):
+#
+#   cd ../mediateca-broadcast && docker compose up
+#
+# Issue a token once in the hub (this replaces any previous token for that station):
+#
+#   docker compose exec web bin/rails runner 'puts Station.find(STATION_ID).assign_agent_token!'
+#
+# Then, in this repository:
+#
+#   cp .env.example .env    # AGENT_TOKEN and SCREEN_ID
+#   docker compose up --build
+#   docker compose logs -f station
+#
+# Hub polling uses the web container's IP. Development rejects Host: web.
+# Leave HUB_BASE_URL unset. Media the package points at is downloaded from
+# that same origin. Playback still needs a TV at ADB_SERIAL; a missing TV
+# does not stop polling.
+#
+# http://localhost:8080 serves cached files at /m/<HTTP_SECRET>/<media_id>.
+#
+# Android TV emulator (needs /dev/kvm, about 3 GB of RAM, and a multi-GB
+# image on first build). It is off unless the profile is selected:
+#
+#   docker compose --profile tv up --build
+#
+# Screen: scrcpy -s emulator-5554
+# Host adb discovers the published port as an emulator, so the serial is
+# emulator-5554, not 127.0.0.1:5555.
+# The emulator is Android TV 9 with VLC (org.videolan.vlc). ADB is tv:5555.
+# The station advertises its own address on the lan network as http_public,
+# which is the URL VLC opens.
+
+name: mediateca_station
+
+services:
+  tv:
+    profiles: ["tv"]
+    build:
+      context: docker/tv
+    devices:
+      - /dev/kvm:/dev/kvm
+    ports:
+      - "5555:5555"
+    environment:
+      EMULATOR_MEMORY: ${EMULATOR_MEMORY:-2048}
+      EMULATOR_CORES: ${EMULATOR_CORES:-2}
+    mem_limit: 3g
+    shm_size: 2gb
+    networks:
+      - lan
+    healthcheck:
+      test: ["CMD-SHELL", "adb shell pm path org.videolan.vlc | tr -d '\\r' | grep -q org.videolan.vlc"]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 180s
+    restart: unless-stopped
+
+  station:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      AGENT_TOKEN: ${AGENT_TOKEN:-}
+      SCREEN_ID: ${SCREEN_ID:-}
+      ADB_SERIAL: ${ADB_SERIAL:-tv:5555}
+      HUB_BASE_URL: ${HUB_BASE_URL:-}
+      HTTP_LISTEN: ${HTTP_LISTEN:-0.0.0.0:8080}
+      HTTP_SECRET: ${HTTP_SECRET:-dev-only-http-secret-not-for-production}
+      POLL_INTERVAL: ${POLL_INTERVAL:-15s}
+      LATE_THRESHOLD: ${LATE_THRESHOLD:-2s}
+      DATA_DIR: /var/lib/mediateca-station
+    volumes:
+      - station-data:/var/lib/mediateca-station
+      # Full config instead of the variables above. Mode must be 0600.
+      # - ./config.yaml:/etc/mediateca-station/config.yaml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      tv:
+        condition: service_healthy
+        required: false
+    networks:
+      - hub
+      - lan
+    restart: unless-stopped
+
+networks:
+  hub:
+    name: mediateca_broadcast_default
+    external: true
+  lan:
+
+volumes:
+  station-data:

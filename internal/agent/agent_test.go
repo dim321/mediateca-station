@@ -144,6 +144,23 @@ func TestTickStartsAndDoesNotRepeat(t *testing.T) {
 	}
 }
 
+func TestMediaURLUsesHTTPPublic(t *testing.T) {
+	dir := t.TempDir()
+	start := time.Date(2026, 9, 2, 2, 0, 0, 0, time.UTC)
+	seedReady(t, dir, 19, "/clip.ts")
+	cfg := testCfg(dir)
+	cfg.HTTPListen = "0.0.0.0:8080"
+	cfg.HTTPPublic = "10.0.0.8:8080"
+	p := &fakePlayer{}
+	a, _ := newTestAgent(t, cfg, &fakeHub{}, p)
+	a.now = func() time.Time { return start }
+	a.pkg = ptrPkg(pkgAt(start, 19, []int{7}))
+	a.tick(context.Background())
+	if len(p.urls) != 1 || p.urls[0] != "http://10.0.0.8:8080/m/0123456789abcdef0123456789abcdef/19" {
+		t.Fatalf("url %v", p.urls)
+	}
+}
+
 func TestFailedStartRetriesInsideWindow(t *testing.T) {
 	dir := t.TempDir()
 	start := time.Date(2026, 9, 2, 2, 0, 0, 0, time.UTC)
