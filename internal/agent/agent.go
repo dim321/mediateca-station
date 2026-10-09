@@ -192,6 +192,7 @@ func (a *Agent) loop(ctx context.Context) error {
 			tele = time.NewTicker(teleInterval)
 		}
 		a.tick(ctx)
+		a.drain(ctx)
 		timer := time.NewTimer(time.Until(a.wake(a.now())))
 		select {
 		case <-ctx.Done():
