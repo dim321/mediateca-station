@@ -92,3 +92,63 @@ func TestLoadRejectsInvalidFields(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadVoxelPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := []byte(`
+hub_base_url: "https://hub.example"
+agent_token: "token"
+data_dir: "/var/lib/mediateca-station"
+broadcast_bind: "192.168.33.1"
+broadcast_bin: "/home/stream/bin/broadcast"
+fifo_dir: "/tmp"
+voxel_apk: "/home/stream/apk/voxel-debug.apk"
+screens:
+  - screen_id: 7
+    adb_serial: "192.168.33.182:5555"
+    stream_port: 8091
+    mac: "78:53:33:4b:2c:29"
+`)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.VoxelPath() {
+		t.Fatal("expected Voxel path")
+	}
+	if cfg.Screens[0].StreamPort != 8091 {
+		t.Fatalf("port=%d", cfg.Screens[0].StreamPort)
+	}
+	if cfg.ChunkSize != 18800 {
+		t.Fatalf("chunk=%d", cfg.ChunkSize)
+	}
+}
+
+func TestLoadLabPathStillRequiresHTTP(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := []byte(`
+hub_base_url: "https://hub.example"
+agent_token: "token"
+http_listen: "127.0.0.1:8080"
+http_secret: "0123456789abcdef0123456789abcdef"
+data_dir: "/tmp/data"
+screens:
+  - screen_id: 7
+    adb_serial: "192.168.1.21:5555"
+`)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.VoxelPath() {
+		t.Fatal("lab must not be Voxel path")
+	}
+}
