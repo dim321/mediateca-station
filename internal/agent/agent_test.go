@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"mediateca-station/internal/air"
 	"mediateca-station/internal/config"
 	"mediateca-station/internal/hub"
 	"mediateca-station/internal/report"
@@ -60,6 +61,22 @@ func (f *fakePlayer) Stop(context.Context, string) error {
 	return nil
 }
 
+type fakeAir struct {
+	starts []air.StartReq
+	stops  int
+	err    error
+}
+
+func (f *fakeAir) Start(_ context.Context, req air.StartReq) error {
+	f.starts = append(f.starts, req)
+	return f.err
+}
+
+func (f *fakeAir) Stop(context.Context, string, int) error {
+	f.stops++
+	return nil
+}
+
 func testCfg(dir string) config.File {
 	return config.File{
 		HubBaseURL:    "https://hub.example",
@@ -70,6 +87,21 @@ func testCfg(dir string) config.File {
 		PollInterval:  time.Minute,
 		DataDir:       dir,
 		Screens:       []config.Screen{{ScreenID: 7, ADBSerial: "192.168.1.21:5555"}},
+	}
+}
+
+func voxelTestCfg(dir string) config.File {
+	return config.File{
+		HubBaseURL:    "https://hub.example",
+		AgentToken:    "super-secret-token",
+		LateThreshold: 2 * time.Second,
+		PollInterval:  time.Minute,
+		DataDir:       dir,
+		BroadcastBin:  "/usr/local/bin/broadcast",
+		BroadcastBind: "192.168.1.10",
+		FifoDir:       filepath.Join(dir, "fifo"),
+		VoxelAPK:      "/opt/voxel.apk",
+		Screens:       []config.Screen{{ScreenID: 7, ADBSerial: "192.168.1.21:5555", StreamPort: 8091}},
 	}
 }
 
@@ -114,6 +146,32 @@ func newTestAgent(t *testing.T, cfg config.File, h *fakeHub, p *fakePlayer) (*Ag
 		t.Fatal(err)
 	}
 	return a, &buf
+}
+
+func TestTickVoxelPathUsesAir(t *testing.T) {
+	dir := t.TempDir()
+	start := time.Date(2026, 9, 2, 2, 0, 0, 0, time.UTC)
+	seedReady(t, dir, 19, "/clip.ts")
+	p := &fakePlayer{}
+	fa := &fakeAir{}
+	a, _ := newTestAgent(t, voxelTestCfg(dir), &fakeHub{}, p)
+	a.air = fa
+	a.now = func() time.Time { return start }
+	a.pkg = ptrPkg(pkgAt(start, 19, []int{7}))
+	a.tick(context.Background())
+	if p.starts != 0 || p.stops != 0 {
+		t.Fatalf("player starts=%d stops=%d", p.starts, p.stops)
+	}
+	if len(fa.starts) != 1 {
+		t.Fatalf("air starts=%d", len(fa.starts))
+	}
+	req := fa.starts[0]
+	if req.ScreenID != 7 || req.Port != 8091 || req.MediaID != 19 || req.Duration != 30*time.Second {
+		t.Fatalf("start req %+v", req)
+	}
+	if !a.queue.Played("7:19:2026-09-02T02:00:00Z") {
+		t.Fatal("played key missing")
+	}
 }
 
 func TestTickStartsAndDoesNotRepeat(t *testing.T) {

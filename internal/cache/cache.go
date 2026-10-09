@@ -65,6 +65,10 @@ func (c *Cache) Ready(id int, rawURL string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
+func (c *Cache) Path(id int) string {
+	return c.final(id)
+}
+
 func (c *Cache) Open(id int) (*os.File, string, error) {
 	f, err := os.Open(c.final(id))
 	if err != nil {
