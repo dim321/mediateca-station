@@ -63,6 +63,8 @@ type Agent struct {
 	etag         string
 	onScreen     map[int]schedule.Key
 	onScreenMu   sync.RWMutex
+	lastStart    map[int]time.Time
+	lastStartMu  sync.RWMutex
 	logged       map[string]struct{}
 	reportPaused bool
 }
@@ -72,7 +74,7 @@ func Run(ctx context.Context, cfg config.File) error {
 	if err != nil {
 		return err
 	}
-	if cfg.HTTPListen != "" {
+	if !cfg.VoxelPath() && cfg.HTTPListen != "" {
 		ln, err := net.Listen("tcp", cfg.HTTPListen)
 		if err != nil {
 			return err
@@ -104,15 +106,16 @@ func newAgent(cfg config.File, h Hub, p Player, log *slog.Logger) (*Agent, error
 		return nil, err
 	}
 	a := &Agent{
-		cfg:      cfg,
-		hub:      h,
-		player:   p,
-		cache:    cache.New(media),
-		queue:    q,
-		log:      log,
-		now:      func() time.Time { return time.Now().UTC() },
-		onScreen: map[int]schedule.Key{},
-		logged:   map[string]struct{}{},
+		cfg:       cfg,
+		hub:       h,
+		player:    p,
+		cache:     cache.New(media),
+		queue:     q,
+		log:       log,
+		now:       func() time.Time { return time.Now().UTC() },
+		onScreen:  map[int]schedule.Key{},
+		lastStart: map[int]time.Time{},
+		logged:    map[string]struct{}{},
 	}
 	if cfg.VoxelPath() {
 		if err := os.MkdirAll(cfg.FifoDir, 0o700); err != nil {
@@ -123,6 +126,7 @@ func newAgent(cfg config.File, h Hub, p Player, log *slog.Logger) (*Agent, error
 		ctrl := &air.Controller{
 			Pace:      cfg.FeederPace,
 			ChunkSize: cfg.ChunkSize,
+			Log:       log,
 			NewTV: func(serial string) air.TV {
 				return tv.NewAgent(serial)
 			},
@@ -135,28 +139,13 @@ func newAgent(cfg config.File, h Hub, p Player, log *slog.Logger) (*Agent, error
 				return u
 			},
 			OpenWriter: func(port int) (io.WriteCloser, error) {
-				return openFifoWriter(vm, port)
+				return vm.OpenFifo(port)
 			},
 		}
 		a.air = ctrl
 	}
 	a.loadDisk()
 	return a, nil
-}
-
-func openFifoWriter(vm *voxel.Manager, port int) (io.WriteCloser, error) {
-	const attempts = 40
-	const delay = 50 * time.Millisecond
-	var lastErr error
-	for i := 0; i < attempts; i++ {
-		f, err := vm.OpenFifo(port)
-		if err == nil {
-			return f, nil
-		}
-		lastErr = err
-		time.Sleep(delay)
-	}
-	return nil, lastErr
 }
 
 func (a *Agent) ensureBroadcasts(ctx context.Context) {
@@ -292,6 +281,7 @@ func (a *Agent) apply(ctx context.Context, serial string, cmd schedule.Command) 
 				_ = a.air.Stop(ctx, serial, cmd.ScreenID)
 				return
 			}
+			a.markScreenStarted(cmd.ScreenID)
 		} else if err := a.player.Start(ctx, serial, a.mediaURL(cmd.Entry.Media.ID), cmd.Entry.Media.MimeType); err != nil {
 			a.log.Error("adb start failed", "screen_id", cmd.ScreenID, "media_id", cmd.Entry.Media.ID)
 			_ = a.player.Stop(ctx, serial)
@@ -540,10 +530,11 @@ func (a *Agent) runHealthWatcher(ctx context.Context) {
 		ids = append(ids, screen.ScreenID)
 	}
 	w := &health.Watcher{
-		Interval:    30 * time.Second,
-		AutoRestart: true,
-		OnAir:       a.screenOnAir,
-		Client:      a.tvHealthClient,
+		Interval:        30 * time.Second,
+		AutoRestart:     true,
+		OnAir:           a.screenOnAir,
+		StartedRecently: a.screenStartedRecently,
+		Client:          a.tvHealthClient,
 	}
 	if err := w.Run(ctx, ids); err != nil && ctx.Err() == nil {
 		a.log.Error("health watcher", "err", err.Error())
@@ -555,6 +546,19 @@ func (a *Agent) screenOnAir(screenID int) bool {
 	_, ok := a.onScreen[screenID]
 	a.onScreenMu.RUnlock()
 	return ok
+}
+
+func (a *Agent) markScreenStarted(screenID int) {
+	a.lastStartMu.Lock()
+	a.lastStart[screenID] = a.now()
+	a.lastStartMu.Unlock()
+}
+
+func (a *Agent) screenStartedRecently(screenID int) bool {
+	a.lastStartMu.RLock()
+	at, ok := a.lastStart[screenID]
+	a.lastStartMu.RUnlock()
+	return ok && a.now().Sub(at) < 10*time.Second
 }
 
 func (a *Agent) tvHealthClient(screenID int) health.ScreenClient {

@@ -2,6 +2,7 @@ package voxel
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,7 +10,10 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
 )
+
+const fifoOpenTimeout = 2 * time.Second
 
 type Process interface {
 	Pid() int
@@ -30,13 +34,21 @@ func (ExecRunner) Start(ctx context.Context, argv ...string) (Process, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	return &osProcess{cmd: cmd}, nil
+	p := &osProcess{cmd: cmd, done: make(chan struct{})}
+	go func() {
+		_ = cmd.Wait()
+		close(p.done)
+	}()
+	return p, nil
 }
 
-type osProcess struct{ cmd *exec.Cmd }
+type osProcess struct {
+	cmd  *exec.Cmd
+	done chan struct{}
+}
 
-func (p *osProcess) Pid() int      { return p.cmd.Process.Pid }
-func (p *osProcess) Wait() error   { return p.cmd.Wait() }
+func (p *osProcess) Pid() int    { return p.cmd.Process.Pid }
+func (p *osProcess) Wait() error { return p.cmd.Wait() }
 func (p *osProcess) Kill() error {
 	if p.cmd.Process == nil {
 		return nil
@@ -44,10 +56,12 @@ func (p *osProcess) Kill() error {
 	return p.cmd.Process.Kill()
 }
 func (p *osProcess) Running() bool {
-	if p.cmd.ProcessState != nil && p.cmd.ProcessState.Exited() {
+	select {
+	case <-p.done:
 		return false
+	default:
+		return p.cmd.Process != nil
 	}
-	return p.cmd.Process != nil
 }
 
 type Manager struct {
@@ -73,6 +87,7 @@ func (m *Manager) Ensure(ctx context.Context, port int) error {
 	if p, ok := m.procs[port]; ok && p.Running() {
 		return nil
 	}
+	delete(m.procs, port)
 	fifo := m.FifoPath(port)
 	if err := ensureFifo(fifo); err != nil {
 		return err
@@ -103,7 +118,27 @@ func (m *Manager) Stop(port int) error {
 }
 
 func (m *Manager) OpenFifo(port int) (*os.File, error) {
-	return os.OpenFile(m.FifoPath(port), os.O_WRONLY, 0)
+	return openFifoWriter(m.FifoPath(port), fifoOpenTimeout)
+}
+
+func openFifoWriter(path string, timeout time.Duration) (*os.File, error) {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		f, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+		if err == nil {
+			return f, nil
+		}
+		lastErr = err
+		if errors.Is(err, syscall.ENXIO) {
+			if time.Now().After(deadline) {
+				return nil, lastErr
+			}
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		return nil, err
+	}
 }
 
 func ensureFifo(path string) error {

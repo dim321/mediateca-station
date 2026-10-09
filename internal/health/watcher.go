@@ -17,10 +17,11 @@ type ScreenClient interface {
 }
 
 type Watcher struct {
-	Interval    time.Duration
-	AutoRestart bool
-	OnAir       func(screenID int) bool
-	Client      func(screenID int) ScreenClient
+	Interval        time.Duration
+	AutoRestart     bool
+	OnAir           func(screenID int) bool
+	StartedRecently func(screenID int) bool
+	Client          func(screenID int) ScreenClient
 }
 
 func (w *Watcher) Run(ctx context.Context, screenIDs []int) error {
@@ -46,6 +47,9 @@ func (w *Watcher) tick(ctx context.Context, screenIDs []int) {
 	}
 	for _, screenID := range screenIDs {
 		if w.OnAir != nil && !w.OnAir(screenID) {
+			continue
+		}
+		if w.StartedRecently != nil && w.StartedRecently(screenID) {
 			continue
 		}
 		client := w.Client(screenID)

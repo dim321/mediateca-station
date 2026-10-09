@@ -7,48 +7,61 @@ import (
 	"time"
 )
 
-type stub struct {
-	playing  bool
-	restarts int32
+type fakeClient struct {
+	restarts atomic.Int32
 }
 
-func (s *stub) Status(ctx context.Context) (TvStatus, error) {
-	return TvStatus{Playing: s.playing}, nil
+func (f *fakeClient) Status(context.Context) (TvStatus, error) {
+	return TvStatus{Playing: false}, nil
 }
 
-func (s *stub) RestartStream(ctx context.Context) error {
-	atomic.AddInt32(&s.restarts, 1)
+func (f *fakeClient) RestartStream(context.Context) error {
+	f.restarts.Add(1)
 	return nil
 }
 
-func TestWatcherRestartsWhenNotPlayingOnAir(t *testing.T) {
-	s := &stub{playing: false}
+func TestWatcherSkipsRecentlyStarted(t *testing.T) {
+	client := &fakeClient{}
 	w := &Watcher{
-		Interval:    time.Millisecond,
 		AutoRestart: true,
-		OnAir:       func(screenID int) bool { return true },
-		Client:      func(screenID int) ScreenClient { return s },
+		OnAir:       func(int) bool { return true },
+		StartedRecently: func(int) bool {
+			return true
+		},
+		Client: func(int) ScreenClient { return client },
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	_ = w.Run(ctx, []int{7})
-	if atomic.LoadInt32(&s.restarts) < 1 {
-		t.Fatal("expected restart")
+	w.tick(context.Background(), []int{7})
+	if client.restarts.Load() != 0 {
+		t.Fatalf("restarts=%d want 0", client.restarts.Load())
 	}
 }
 
-func TestWatcherIdleNoRestart(t *testing.T) {
-	s := &stub{playing: false}
+func TestWatcherRestartsWhenNotRecent(t *testing.T) {
+	client := &fakeClient{}
 	w := &Watcher{
-		Interval:    time.Millisecond,
-		AutoRestart: true,
-		OnAir:       func(screenID int) bool { return false },
-		Client:      func(screenID int) ScreenClient { return s },
+		AutoRestart:     true,
+		OnAir:           func(int) bool { return true },
+		StartedRecently: func(int) bool { return false },
+		Client:          func(int) ScreenClient { return client },
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	_ = w.Run(ctx, []int{7})
-	if atomic.LoadInt32(&s.restarts) != 0 {
-		t.Fatalf("expected no restarts, got %d", s.restarts)
+	w.tick(context.Background(), []int{7})
+	if client.restarts.Load() != 1 {
+		t.Fatalf("restarts=%d want 1", client.restarts.Load())
+	}
+}
+
+func TestStartedRecentlyGrace(t *testing.T) {
+	now := time.Now()
+	recent := map[int]time.Time{7: now.Add(-5 * time.Second)}
+	check := func(id int) bool {
+		at, ok := recent[id]
+		return ok && now.Sub(at) < 10*time.Second
+	}
+	if !check(7) {
+		t.Fatal("expected grace")
+	}
+	recent[7] = now.Add(-11 * time.Second)
+	if check(7) {
+		t.Fatal("expected outside grace")
 	}
 }
