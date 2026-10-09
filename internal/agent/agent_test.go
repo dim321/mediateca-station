@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -25,6 +26,14 @@ type fakeHub struct {
 	notMod bool
 	posts  []int
 	post   int
+
+	commands       []hub.Command
+	fetchCmdErr    error
+	postResultsErr error
+	teleErr        error
+	telePosts      int
+	lastTelemetry  hub.Telemetry
+	commandResults []hub.CommandResult
 }
 
 func (f *fakeHub) FetchConfig(context.Context) (hub.Config, error) {
@@ -41,6 +50,28 @@ func (f *fakeHub) PostPlayEvent(context.Context, int, int, time.Time) (int, stri
 		return 0, "", errors.New("dial")
 	}
 	return f.post, `{"error":"x"}`, nil
+}
+
+func (f *fakeHub) PostTelemetry(_ context.Context, tel hub.Telemetry) error {
+	f.telePosts++
+	f.lastTelemetry = tel
+	return f.teleErr
+}
+
+func (f *fakeHub) FetchCommands(context.Context, string) (hub.CommandsResponse, error) {
+	if f.fetchCmdErr != nil {
+		return hub.CommandsResponse{}, f.fetchCmdErr
+	}
+	return hub.CommandsResponse{Commands: append([]hub.Command(nil), f.commands...)}, nil
+}
+
+func (f *fakeHub) PostCommandResults(_ context.Context, results []hub.CommandResult) error {
+	f.commandResults = append(f.commandResults, results...)
+	return f.postResultsErr
+}
+
+func (f *fakeHub) UploadArtifact(context.Context, string, io.Reader, string) error {
+	return nil
 }
 
 type fakePlayer struct {
@@ -400,6 +431,94 @@ func TestDrainDrops404AndKeepsNetworkError(t *testing.T) {
 	_, ok, err = a.queue.Peek()
 	if err != nil || !ok {
 		t.Fatalf("network error dropped the event ok=%v err=%v", ok, err)
+	}
+}
+
+type fakeCmdExec struct {
+	runs []hub.Command
+}
+
+func (f *fakeCmdExec) Run(_ context.Context, cmd hub.Command) hub.CommandResult {
+	f.runs = append(f.runs, cmd)
+	return hub.CommandResult{CommandID: cmd.ID, OK: true, FinishedAt: time.Now().UTC()}
+}
+
+func TestPollRunsCommandsAndPostsResults(t *testing.T) {
+	dir := t.TempDir()
+	h := &fakeHub{
+		cfg: hub.Config{StationID: 1},
+		pkg: pkgAt(time.Now(), 19, []int{7}),
+		commands: []hub.Command{{
+			ID: "cmd_1", ScreenID: 7, Type: "restart_stream", IssuedAt: "2026-10-09T11:01:00Z",
+		}},
+	}
+	exec := &fakeCmdExec{}
+	a, _ := newTestAgent(t, testCfg(dir), h, &fakePlayer{})
+	a.cmdExec = exec
+	a.poll(context.Background())
+	if len(exec.runs) != 1 || exec.runs[0].ID != "cmd_1" {
+		t.Fatalf("runs %+v", exec.runs)
+	}
+	if len(h.commandResults) != 1 || !h.commandResults[0].OK {
+		t.Fatalf("results %+v", h.commandResults)
+	}
+}
+
+func TestPollCommands401PausesReporting(t *testing.T) {
+	dir := t.TempDir()
+	h := &fakeHub{
+		cfg:         hub.Config{StationID: 1},
+		notMod:      true,
+		fetchCmdErr: hub.ErrUnauthorized,
+		post:        201,
+	}
+	a, _ := newTestAgent(t, testCfg(dir), h, &fakePlayer{})
+	ev := report.Event{ScreenID: 7, MediaAssetID: 19, StartedAt: time.Now().UTC()}
+	if err := a.queue.Enqueue(ev, "7:19:2026-09-02T02:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	a.poll(context.Background())
+	if !a.reportPaused {
+		t.Fatal("expected paused")
+	}
+	if len(h.posts) != 0 {
+		t.Fatalf("drain ran while paused posts=%d", len(h.posts))
+	}
+}
+
+func TestPostTelemetry401Pauses(t *testing.T) {
+	dir := t.TempDir()
+	h := &fakeHub{teleErr: hub.ErrUnauthorized}
+	a, _ := newTestAgent(t, testCfg(dir), h, &fakePlayer{})
+	a.postTelemetry(context.Background())
+	if !a.reportPaused {
+		t.Fatal("expected paused")
+	}
+}
+
+func TestPostTelemetrySkipsWhenPaused(t *testing.T) {
+	dir := t.TempDir()
+	h := &fakeHub{}
+	a, _ := newTestAgent(t, testCfg(dir), h, &fakePlayer{})
+	a.reportPaused = true
+	a.postTelemetry(context.Background())
+	if h.telePosts != 0 {
+		t.Fatalf("telePosts=%d", h.telePosts)
+	}
+}
+
+func TestBuildTelemetryIncludesScreens(t *testing.T) {
+	dir := t.TempDir()
+	a, _ := newTestAgent(t, testCfg(dir), &fakeHub{}, &fakePlayer{})
+	a.etag = `"v1"`
+	a.now = func() time.Time { return time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC) }
+	a.startedAt = a.now().Add(-10 * time.Second)
+	tel := a.buildTelemetry(context.Background())
+	if tel.Station.PackageETag != `"v1"` || tel.Station.UptimeSeconds != 10 {
+		t.Fatalf("station %+v", tel.Station)
+	}
+	if len(tel.Screens) != 1 || tel.Screens[0].ScreenID != 7 {
+		t.Fatalf("screens %+v", tel.Screens)
 	}
 }
 

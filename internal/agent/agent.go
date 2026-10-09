@@ -13,11 +13,13 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"mediateca-station/internal/air"
 	"mediateca-station/internal/cache"
+	"mediateca-station/internal/commands"
 	"mediateca-station/internal/config"
 	"mediateca-station/internal/fsutil"
 	"mediateca-station/internal/health"
@@ -34,6 +36,14 @@ type Hub interface {
 	FetchConfig(ctx context.Context) (hub.Config, error)
 	FetchPackage(ctx context.Context, ifNoneMatch string) (hub.Package, bool, error)
 	PostPlayEvent(ctx context.Context, screenID, mediaID int, startedAt time.Time) (int, string, error)
+	PostTelemetry(ctx context.Context, tel hub.Telemetry) error
+	FetchCommands(ctx context.Context, ifNoneMatch string) (hub.CommandsResponse, error)
+	PostCommandResults(ctx context.Context, results []hub.CommandResult) error
+	UploadArtifact(ctx context.Context, uploadURL string, r io.Reader, contentType string) error
+}
+
+type commandRunner interface {
+	Run(ctx context.Context, cmd hub.Command) hub.CommandResult
 }
 
 type Player interface {
@@ -69,6 +79,8 @@ type Agent struct {
 	reportPaused      bool
 	telemetryInterval time.Duration
 	healthWatcher     *health.Watcher
+	cmdExec           commandRunner
+	startedAt         time.Time
 }
 
 func Run(ctx context.Context, cfg config.File) error {
@@ -118,7 +130,9 @@ func newAgent(cfg config.File, h Hub, p Player, log *slog.Logger) (*Agent, error
 		onScreen:  map[int]schedule.Key{},
 		lastStart: map[int]time.Time{},
 		logged:    map[string]struct{}{},
+		startedAt: time.Now().UTC(),
 	}
+	_, _, a.telemetryInterval = health.TVMonitorSettings(nil)
 	if cfg.VoxelPath() {
 		if err := os.MkdirAll(cfg.FifoDir, 0o700); err != nil {
 			return nil, err
@@ -167,10 +181,17 @@ func (a *Agent) ensureBroadcasts(ctx context.Context) {
 func (a *Agent) loop(ctx context.Context) error {
 	poll := time.NewTicker(a.cfg.PollInterval)
 	defer poll.Stop()
+	teleInterval := a.effectiveTelemetryInterval()
+	tele := time.NewTicker(teleInterval)
+	defer tele.Stop()
 	for {
 		a.poll(ctx)
+		if next := a.effectiveTelemetryInterval(); next != teleInterval {
+			tele.Stop()
+			teleInterval = next
+			tele = time.NewTicker(teleInterval)
+		}
 		a.tick(ctx)
-		a.drain(ctx)
 		timer := time.NewTimer(time.Until(a.wake(a.now())))
 		select {
 		case <-ctx.Done():
@@ -178,9 +199,20 @@ func (a *Agent) loop(ctx context.Context) error {
 			return nil
 		case <-poll.C:
 			timer.Stop()
+		case <-tele.C:
+			timer.Stop()
+			a.postTelemetry(ctx)
 		case <-timer.C:
 		}
 	}
+}
+
+func (a *Agent) effectiveTelemetryInterval() time.Duration {
+	if a.telemetryInterval > 0 {
+		return a.telemetryInterval
+	}
+	_, _, d := health.TVMonitorSettings(nil)
+	return d
 }
 
 func (a *Agent) poll(ctx context.Context) {
@@ -213,10 +245,12 @@ func (a *Agent) poll(ctx context.Context) {
 	if notMod {
 		a.reportPaused = false
 		a.log.Info("poll", "result", "not_modified")
+		a.afterPoll(ctx)
 		return
 	}
 	if err := a.storePackage(pkg); err != nil {
 		a.log.Error("store package", "err", err.Error())
+		a.afterPoll(ctx)
 		return
 	}
 	a.reportPaused = false
@@ -224,6 +258,176 @@ func (a *Agent) poll(ctx context.Context) {
 	if err := a.cache.Reconcile(ctx, a.cfg.HubBaseURL, a.mediaItems()); err != nil {
 		a.log.Error("cache", "err", err.Error())
 	}
+	a.afterPoll(ctx)
+}
+
+func (a *Agent) afterPoll(ctx context.Context) {
+	if !a.reportPaused {
+		a.pollCommands(ctx)
+	}
+	a.drain(ctx)
+}
+
+func (a *Agent) pollCommands(ctx context.Context) {
+	resp, err := a.hub.FetchCommands(ctx, "")
+	if errors.Is(err, hub.ErrUnauthorized) {
+		a.pauseToken()
+		return
+	}
+	if err != nil {
+		a.log.Error("hub commands", "err", err.Error())
+		return
+	}
+	if len(resp.Commands) == 0 {
+		return
+	}
+	exec := a.commandExecutor()
+	results := make([]hub.CommandResult, 0, len(resp.Commands))
+	for _, cmd := range resp.Commands {
+		results = append(results, exec.Run(ctx, cmd))
+	}
+	if err := a.hub.PostCommandResults(ctx, results); errors.Is(err, hub.ErrUnauthorized) {
+		a.pauseToken()
+	}
+}
+
+func (a *Agent) commandExecutor() commandRunner {
+	if a.cmdExec != nil {
+		return a.cmdExec
+	}
+	return &commands.Executor{
+		Screen: a.cfg.ScreenByID,
+		StreamURL: func(id int) string {
+			u, ok := a.cfg.StreamURL(id)
+			if !ok {
+				return ""
+			}
+			return u
+		},
+		APKPath: func() string { return a.cfg.VoxelAPK },
+		TV: func(screenID int) commands.AgentClient {
+			serial, ok := a.cfg.Serial(screenID)
+			if !ok {
+				return nil
+			}
+			return tv.NewAgent(serial)
+		},
+		Device: func(screenID int) commands.DeviceClient {
+			screen, ok := a.cfg.ScreenByID(screenID)
+			if !ok {
+				return nil
+			}
+			return &commandDevice{Device: tv.Device{Serial: screen.ADBSerial, MAC: screen.MAC, Runner: tv.ExecRunner{}}}
+		},
+		Upload: func(ctx context.Context, url string, r io.Reader, contentType string) error {
+			return a.hub.UploadArtifact(ctx, url, r, contentType)
+		},
+	}
+}
+
+func (a *Agent) postTelemetry(ctx context.Context) {
+	if a.reportPaused {
+		return
+	}
+	tel := a.buildTelemetry(ctx)
+	if err := a.hub.PostTelemetry(ctx, tel); errors.Is(err, hub.ErrUnauthorized) {
+		a.pauseToken()
+		return
+	} else if err != nil {
+		a.log.Error("hub telemetry", "err", err.Error())
+	}
+}
+
+func (a *Agent) buildTelemetry(ctx context.Context) hub.Telemetry {
+	now := a.now().UTC()
+	uptime := int(now.Sub(a.startedAt).Seconds())
+	if uptime < 0 {
+		uptime = 0
+	}
+	station := hub.StationTelemetry{
+		UptimeSeconds: uptime,
+		PackageETag:   a.etag,
+		BroadcastOK:   a.broadcastOK(ctx),
+	}
+	screens := make([]hub.ScreenTelemetry, 0, len(a.cfg.Screens))
+	for _, screen := range a.cfg.Screens {
+		screens = append(screens, a.screenTelemetry(ctx, screen))
+	}
+	return hub.Telemetry{
+		ReportedAt: now,
+		Station:    station,
+		Screens:    screens,
+	}
+}
+
+func (a *Agent) broadcastOK(ctx context.Context) bool {
+	if a.voxel == nil {
+		return true
+	}
+	for _, screen := range a.cfg.Screens {
+		if screen.StreamPort <= 0 {
+			continue
+		}
+		if err := a.voxel.Ensure(ctx, screen.StreamPort); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *Agent) screenTelemetry(ctx context.Context, screen config.Screen) hub.ScreenTelemetry {
+	out := hub.ScreenTelemetry{
+		ScreenID:   screen.ScreenID,
+		StreamPort: screen.StreamPort,
+	}
+	out.Reachable = screenReachable(ctx, screen.ADBSerial)
+	serial, ok := a.cfg.Serial(screen.ScreenID)
+	if !ok {
+		return out
+	}
+	agent := tv.NewAgent(serial)
+	st, err := agent.Status(ctx)
+	if err != nil {
+		msg := err.Error()
+		out.LastError = &msg
+		return out
+	}
+	out.AgentOK = true
+	out.Playing = st.Playing
+	out.URL = st.URL
+	return out
+}
+
+type commandDevice struct {
+	tv.Device
+}
+
+func (d *commandDevice) EnsureApp(ctx context.Context, agent commands.AgentClient, apk string) error {
+	tvAgent, ok := agent.(*tv.Agent)
+	if !ok {
+		return fmt.Errorf("unexpected tv agent type")
+	}
+	return d.Device.EnsureApp(ctx, tvAgent, apk)
+}
+
+func screenReachable(ctx context.Context, adbSerial string) bool {
+	if adbSerial == "" {
+		return false
+	}
+	dial := (&net.Dialer{Timeout: 2 * time.Second}).DialContext
+	if conn, err := dial(ctx, "tcp", adbSerial); err == nil {
+		conn.Close()
+		return true
+	}
+	host := adbSerial
+	if i := strings.IndexByte(adbSerial, ':'); i >= 0 {
+		host = adbSerial[:i]
+	}
+	if conn, err := dial(ctx, "tcp", net.JoinHostPort(host, "8989")); err == nil {
+		conn.Close()
+		return true
+	}
+	return false
 }
 
 func (a *Agent) tick(ctx context.Context) {
