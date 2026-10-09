@@ -5,6 +5,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"mediateca-station/internal/hub"
 )
 
 type fakeClient struct {
@@ -47,6 +49,46 @@ func TestWatcherRestartsWhenNotRecent(t *testing.T) {
 	w.tick(context.Background(), []int{7})
 	if client.restarts.Load() != 1 {
 		t.Fatalf("restarts=%d want 1", client.restarts.Load())
+	}
+}
+
+func TestTVMonitorSettingsDefaults(t *testing.T) {
+	h, auto, telem := TVMonitorSettings(nil)
+	if h != DefaultHealthInterval || !auto || telem != DefaultTelemetryInterval {
+		t.Fatalf("h=%v auto=%v telem=%v", h, auto, telem)
+	}
+}
+
+func TestTVMonitorSettingsOverrideAndClamp(t *testing.T) {
+	h, auto, telem := TVMonitorSettings(&hub.TVMonitor{
+		HealthIntervalSeconds:     2,
+		AutoRestartWhenNotPlaying: false,
+		TelemetryIntervalSeconds:  90,
+	})
+	if h != 5*time.Second || auto || telem != 90*time.Second {
+		t.Fatalf("h=%v auto=%v telem=%v", h, auto, telem)
+	}
+	h, auto, telem = TVMonitorSettings(&hub.TVMonitor{
+		HealthIntervalSeconds:     45,
+		AutoRestartWhenNotPlaying: true,
+		TelemetryIntervalSeconds:  90,
+	})
+	if h != 45*time.Second || !auto || telem != 90*time.Second {
+		t.Fatalf("h=%v auto=%v telem=%v", h, auto, telem)
+	}
+}
+
+func TestApplyTVMonitorDisablesRestart(t *testing.T) {
+	client := &fakeClient{}
+	w := &Watcher{
+		OnAir:           func(int) bool { return true },
+		StartedRecently: func(int) bool { return false },
+		Client:          func(int) ScreenClient { return client },
+	}
+	w.ApplyTVMonitor(&hub.TVMonitor{AutoRestartWhenNotPlaying: false})
+	w.tick(context.Background(), []int{7})
+	if client.restarts.Load() != 0 {
+		t.Fatalf("restarts=%d want 0", client.restarts.Load())
 	}
 }
 

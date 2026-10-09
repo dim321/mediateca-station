@@ -47,26 +47,28 @@ type Air interface {
 }
 
 type Agent struct {
-	cfg          config.File
-	hub          Hub
-	player       Player
-	air          Air
-	voxel        *voxel.Manager
-	cache        *cache.Cache
-	queue        *report.Queue
-	log          *slog.Logger
-	now          func() time.Time
-	http         *http.Server
-	hubCfg       *hub.Config
-	hubRaw       []byte
-	pkg          *hub.Package
-	etag         string
-	onScreen     map[int]schedule.Key
-	onScreenMu   sync.RWMutex
-	lastStart    map[int]time.Time
-	lastStartMu  sync.RWMutex
-	logged       map[string]struct{}
-	reportPaused bool
+	cfg               config.File
+	hub               Hub
+	player            Player
+	air               Air
+	voxel             *voxel.Manager
+	cache             *cache.Cache
+	queue             *report.Queue
+	log               *slog.Logger
+	now               func() time.Time
+	http              *http.Server
+	hubCfg            *hub.Config
+	hubRaw            []byte
+	pkg               *hub.Package
+	etag              string
+	onScreen          map[int]schedule.Key
+	onScreenMu        sync.RWMutex
+	lastStart         map[int]time.Time
+	lastStartMu       sync.RWMutex
+	logged            map[string]struct{}
+	reportPaused      bool
+	telemetryInterval time.Duration
+	healthWatcher     *health.Watcher
 }
 
 func Run(ctx context.Context, cfg config.File) error {
@@ -465,6 +467,7 @@ func (a *Agent) storeConfig(cfg hub.Config) error {
 	}
 	if a.hubRaw != nil && bytes.Equal(a.hubRaw, raw) {
 		a.hubCfg = &cfg
+		a.applyTVMonitor(cfg)
 		return nil
 	}
 	if err := fsutil.WriteAtomic(filepath.Join(a.cfg.DataDir, "config.json"), raw); err != nil {
@@ -472,6 +475,7 @@ func (a *Agent) storeConfig(cfg hub.Config) error {
 	}
 	a.hubRaw = append([]byte(nil), raw...)
 	a.hubCfg = &cfg
+	a.applyTVMonitor(cfg)
 	a.log.Info("config", "station_id", cfg.StationID, "offline_cache_hours", cfg.OfflineCacheHours)
 	for _, screen := range cfg.Screens {
 		a.log.Info("screen", "screen_id", screen.ID, "orientation", screen.Orientation, "name", screen.Name)
@@ -524,17 +528,31 @@ func (a *Agent) logOnce(key string, fn func()) {
 	fn()
 }
 
+func (a *Agent) applyTVMonitor(cfg hub.Config) {
+	_, _, telemetry := health.TVMonitorSettings(cfg.TVMonitor)
+	a.telemetryInterval = telemetry
+	if a.healthWatcher != nil {
+		a.healthWatcher.ApplyTVMonitor(cfg.TVMonitor)
+	}
+}
+
 func (a *Agent) runHealthWatcher(ctx context.Context) {
 	ids := make([]int, 0, len(a.cfg.Screens))
 	for _, screen := range a.cfg.Screens {
 		ids = append(ids, screen.ScreenID)
 	}
 	w := &health.Watcher{
-		Interval:        30 * time.Second,
-		AutoRestart:     true,
 		OnAir:           a.screenOnAir,
 		StartedRecently: a.screenStartedRecently,
 		Client:          a.tvHealthClient,
+	}
+	a.healthWatcher = w
+	if a.hubCfg != nil {
+		a.applyTVMonitor(*a.hubCfg)
+	} else {
+		_, _, telemetry := health.TVMonitorSettings(nil)
+		a.telemetryInterval = telemetry
+		w.ApplyTVMonitor(nil)
 	}
 	if err := w.Run(ctx, ids); err != nil && ctx.Err() == nil {
 		a.log.Error("health watcher", "err", err.Error())

@@ -341,6 +341,32 @@ func TestPoll401DoesNotReplacePackage(t *testing.T) {
 	}
 }
 
+func TestApplyTVMonitorFromPoll(t *testing.T) {
+	dir := t.TempDir()
+	h := &fakeHub{cfg: hub.Config{
+		StationID: 1,
+		TVMonitor: &hub.TVMonitor{
+			HealthIntervalSeconds:     45,
+			AutoRestartWhenNotPlaying: false,
+			TelemetryIntervalSeconds:  90,
+		},
+	}}
+	a, _ := newTestAgent(t, voxelTestCfg(dir), h, &fakePlayer{})
+	a.poll(context.Background())
+	if a.telemetryInterval != 90*time.Second {
+		t.Fatalf("telemetry=%v", a.telemetryInterval)
+	}
+}
+
+func TestApplyTVMonitorDefaultsWithoutHubBlock(t *testing.T) {
+	dir := t.TempDir()
+	a, _ := newTestAgent(t, voxelTestCfg(dir), &fakeHub{cfg: hub.Config{StationID: 1}}, &fakePlayer{})
+	a.applyTVMonitor(hub.Config{})
+	if a.telemetryInterval != 60*time.Second {
+		t.Fatalf("telemetry=%v", a.telemetryInterval)
+	}
+}
+
 func TestPollFailureKeepsMedia(t *testing.T) {
 	dir := t.TempDir()
 	seedReady(t, dir, 19, "/clip.ts")
