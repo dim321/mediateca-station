@@ -13,12 +13,14 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	"mediateca-station/internal/air"
 	"mediateca-station/internal/cache"
 	"mediateca-station/internal/config"
 	"mediateca-station/internal/fsutil"
+	"mediateca-station/internal/health"
 	"mediateca-station/internal/httpmedia"
 	"mediateca-station/internal/hub"
 	"mediateca-station/internal/player"
@@ -60,6 +62,7 @@ type Agent struct {
 	pkg          *hub.Package
 	etag         string
 	onScreen     map[int]schedule.Key
+	onScreenMu   sync.RWMutex
 	logged       map[string]struct{}
 	reportPaused bool
 }
@@ -79,6 +82,9 @@ func Run(ctx context.Context, cfg config.File) error {
 		defer a.http.Shutdown(context.Background())
 	}
 	a.ensureBroadcasts(ctx)
+	if a.air != nil {
+		go a.runHealthWatcher(ctx)
+	}
 	return a.loop(ctx)
 }
 
@@ -239,7 +245,10 @@ func (a *Agent) tick(ctx context.Context) {
 			continue
 		}
 		var on *schedule.Key
-		if key, found := a.onScreen[screenID]; found {
+		a.onScreenMu.RLock()
+		key, found := a.onScreen[screenID]
+		a.onScreenMu.RUnlock()
+		if found {
 			on = &key
 		}
 		cmds := schedule.Commands(now, a.cfg.LateThreshold, screenID, entries, a.queue.Played, a.cache.Ready, on)
@@ -261,7 +270,9 @@ func (a *Agent) apply(ctx context.Context, serial string, cmd schedule.Command) 
 			a.log.Error("adb stop failed", "screen_id", cmd.ScreenID)
 			return
 		}
+		a.onScreenMu.Lock()
 		delete(a.onScreen, cmd.ScreenID)
+		a.onScreenMu.Unlock()
 		a.log.Info("stop", "screen_id", cmd.ScreenID)
 	case schedule.KindStart:
 		started := a.now().UTC()
@@ -296,7 +307,9 @@ func (a *Agent) apply(ctx context.Context, serial string, cmd schedule.Command) 
 			a.stopPlayback(ctx, serial, cmd.ScreenID)
 			return
 		}
+		a.onScreenMu.Lock()
 		a.onScreen[cmd.ScreenID] = schedule.EntryKey(cmd.ScreenID, cmd.Entry)
+		a.onScreenMu.Unlock()
 		a.log.Info("start", "screen_id", cmd.ScreenID, "media_id", cmd.Entry.Media.ID, "starts_at", cmd.Entry.StartsAtRaw)
 	case schedule.KindSkip:
 		id := "skip:" + schedule.EntryKey(cmd.ScreenID, cmd.Entry).String() + ":" + cmd.Reason
@@ -519,4 +532,48 @@ func (a *Agent) logOnce(key string, fn func()) {
 	}
 	a.logged[key] = struct{}{}
 	fn()
+}
+
+func (a *Agent) runHealthWatcher(ctx context.Context) {
+	ids := make([]int, 0, len(a.cfg.Screens))
+	for _, screen := range a.cfg.Screens {
+		ids = append(ids, screen.ScreenID)
+	}
+	w := &health.Watcher{
+		Interval:    30 * time.Second,
+		AutoRestart: true,
+		OnAir:       a.screenOnAir,
+		Client:      a.tvHealthClient,
+	}
+	if err := w.Run(ctx, ids); err != nil && ctx.Err() == nil {
+		a.log.Error("health watcher", "err", err.Error())
+	}
+}
+
+func (a *Agent) screenOnAir(screenID int) bool {
+	a.onScreenMu.RLock()
+	_, ok := a.onScreen[screenID]
+	a.onScreenMu.RUnlock()
+	return ok
+}
+
+func (a *Agent) tvHealthClient(screenID int) health.ScreenClient {
+	serial, ok := a.cfg.Serial(screenID)
+	if !ok {
+		return nil
+	}
+	return &tvScreenClient{tv: tv.NewAgent(serial)}
+}
+
+type tvScreenClient struct {
+	tv *tv.Agent
+}
+
+func (c *tvScreenClient) Status(ctx context.Context) (health.TvStatus, error) {
+	st, err := c.tv.Status(ctx)
+	return health.TvStatus{Playing: st.Playing}, err
+}
+
+func (c *tvScreenClient) RestartStream(ctx context.Context) error {
+	return c.tv.RestartStream(ctx)
 }
