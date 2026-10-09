@@ -51,6 +51,17 @@ func TestLoadDefaultsAndScreens(t *testing.T) {
 	}
 }
 
+func TestLoadHTTPPublic(t *testing.T) {
+	body := strings.Replace(validYAML, "http_listen: \"192.168.1.10:8080\"", "http_listen: \"0.0.0.0:8080\"\nhttp_public: \"10.0.0.8:8080\"", 1)
+	cfg, err := Load(writeConfig(t, body, 0o600))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTPListen != "0.0.0.0:8080" || cfg.HTTPPublic != "10.0.0.8:8080" {
+		t.Fatalf("%+v", cfg)
+	}
+}
+
 func TestLoadRejectsGroupReadableFile(t *testing.T) {
 	_, err := Load(writeConfig(t, validYAML, 0o640))
 	if err == nil || !strings.Contains(err.Error(), "group or world readable") {
@@ -70,6 +81,7 @@ func TestLoadRejectsInvalidFields(t *testing.T) {
 		{"dup", validYAML + "  - screen_id: 7\n    adb_serial: \"192.168.1.22:5555\"\n", "duplicate screen_id"},
 		{"duration", validYAML + "late_threshold: \"nope\"\n", "late_threshold"},
 		{"token", strings.Replace(validYAML, "agent_token: \"tok\"", "agent_token: \"\"", 1), "agent_token"},
+		{"public", validYAML + "http_public: \"not-a-host\"\n", "http_public"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

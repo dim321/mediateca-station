@@ -335,7 +335,11 @@ func (a *Agent) mediaItems() []cache.Item {
 }
 
 func (a *Agent) mediaURL(id int) string {
-	return "http://" + a.cfg.HTTPListen + "/m/" + a.cfg.HTTPSecret + "/" + strconv.Itoa(id)
+	host := a.cfg.HTTPListen
+	if a.cfg.HTTPPublic != "" {
+		host = a.cfg.HTTPPublic
+	}
+	return "http://" + host + "/m/" + a.cfg.HTTPSecret + "/" + strconv.Itoa(id)
 }
 
 func (a *Agent) wake(now time.Time) time.Time {
