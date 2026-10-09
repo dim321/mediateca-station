@@ -67,9 +67,24 @@ func (d *Device) Connect(ctx context.Context) error {
 	return d.runner().Run(ctx, "adb", "connect", d.Serial)
 }
 
+func (d *Device) wolFn() func(string) error {
+	if d.WOL != nil {
+		return d.WOL
+	}
+	return DefaultWOL
+}
+
 func (d *Device) Wake(ctx context.Context) error {
 	if err := d.Connect(ctx); err != nil {
-		return err
+		if d.MAC == "" {
+			return err
+		}
+		if wolErr := d.wolFn()(d.MAC); wolErr != nil {
+			return err
+		}
+		if err := d.Connect(ctx); err != nil {
+			return err
+		}
 	}
 	if err := d.runner().Run(ctx, "adb", "-s", d.Serial, "shell", "input", "keyevent", "KEYCODE_WAKEUP"); err != nil {
 		return err
@@ -77,15 +92,11 @@ func (d *Device) Wake(ctx context.Context) error {
 	if d.MAC == "" {
 		return nil
 	}
-	wol := d.WOL
-	if wol == nil {
-		wol = DefaultWOL
-	}
 	asleep, err := d.asleep(ctx)
 	if err != nil || !asleep {
 		return err
 	}
-	return wol(d.MAC)
+	return d.wolFn()(d.MAC)
 }
 
 func (d *Device) asleep(ctx context.Context) (bool, error) {

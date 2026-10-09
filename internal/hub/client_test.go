@@ -150,6 +150,18 @@ func TestPostTelemetry(t *testing.T) {
 	}
 }
 
+func TestPostTelemetry204(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "tok")
+	c.HTTP = srv.Client()
+	if err := c.PostTelemetry(context.Background(), Telemetry{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestFetchCommands(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/agent/v1/commands" {

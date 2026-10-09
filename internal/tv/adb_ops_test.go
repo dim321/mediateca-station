@@ -207,6 +207,43 @@ func TestWakePropagatesRunnerError(t *testing.T) {
 	}
 }
 
+func TestWakeWOLOnConnectFailure(t *testing.T) {
+	connects := 0
+	r := &recRunner{}
+	r.err = errors.New("connect failed")
+	d := &Device{
+		Serial: "192.168.33.182:5555",
+		Runner: &connectCountRunner{inner: r, onConnect: func() { connects++ }},
+		MAC:    "78:53:33:4b:2c:29",
+		WOL: func(mac string) error {
+			r.err = nil
+			return nil
+		},
+	}
+	if err := d.Wake(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if connects < 2 {
+		t.Fatalf("connect attempts=%d want >=2", connects)
+	}
+}
+
+type connectCountRunner struct {
+	inner     *recRunner
+	onConnect func()
+}
+
+func (c *connectCountRunner) Run(ctx context.Context, argv ...string) error {
+	if len(argv) >= 2 && argv[1] == "connect" {
+		c.onConnect()
+	}
+	return c.inner.Run(ctx, argv...)
+}
+
+func (c *connectCountRunner) RunOut(ctx context.Context, argv ...string) ([]byte, error) {
+	return c.inner.RunOut(ctx, argv...)
+}
+
 func jsonStatus(w http.ResponseWriter) error {
 	w.Header().Set("Content-Type", "application/json")
 	_, err := w.Write([]byte(`{"playing":false,"url":"","buffer_ms":0}`))

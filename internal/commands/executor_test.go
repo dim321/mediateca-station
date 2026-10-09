@@ -159,15 +159,28 @@ func TestExecutorWakeSleep(t *testing.T) {
 	}
 }
 
-func TestExecutorRecord(t *testing.T) {
+func TestExecutorRecordMissingUploadURL(t *testing.T) {
 	dev := &fakeDev{}
 	ex := testExecutor(&fakeTV{}, dev)
 	res := ex.Run(context.Background(), hub.Command{
 		ID: "c1", ScreenID: 7, Type: "record",
 		Params: map[string]any{"seconds": float64(5)},
 	})
-	if !res.OK || dev.records != 1 || dev.recordSec != 5 || dev.recordDest == "" {
-		t.Fatalf("%+v records=%d sec=%d dest=%q", res, dev.records, dev.recordSec, dev.recordDest)
+	if res.OK || res.Error == nil || *res.Error != "missing_upload_url" || dev.records != 0 {
+		t.Fatalf("%+v records=%d", res, dev.records)
+	}
+}
+
+func TestExecutorRecordClampsSeconds(t *testing.T) {
+	dev := &fakeDev{}
+	ex := testExecutor(&fakeTV{}, dev)
+	ex.Upload = func(context.Context, string, io.Reader, string) error { return nil }
+	res := ex.Run(context.Background(), hub.Command{
+		ID: "c1", ScreenID: 7, Type: "record",
+		Params: map[string]any{"upload_url": "https://hub/video", "seconds": float64(500)},
+	})
+	if !res.OK || dev.recordSec != 120 {
+		t.Fatalf("%+v sec=%d", res, dev.recordSec)
 	}
 }
 
@@ -188,6 +201,27 @@ func TestExecutorRecordUpload(t *testing.T) {
 	})
 	if !res.OK || dev.records != 1 || uploaded.String() != "mp4" {
 		t.Fatalf("%+v body=%q", res, uploaded.String())
+	}
+}
+
+func TestExecutorScreenshotMissingUploadURL(t *testing.T) {
+	dev := &fakeDev{}
+	ex := testExecutor(&fakeTV{}, dev)
+	res := ex.Run(context.Background(), hub.Command{ID: "c1", ScreenID: 7, Type: "screenshot"})
+	if res.OK || res.Error == nil || *res.Error != "missing_upload_url" || dev.screenshots != 0 {
+		t.Fatalf("%+v shots=%d", res, dev.screenshots)
+	}
+}
+
+func TestExecutorInstallAPKRejectsHTTPURL(t *testing.T) {
+	dev := &fakeDev{}
+	ex := testExecutor(&fakeTV{}, dev)
+	res := ex.Run(context.Background(), hub.Command{
+		ID: "c1", ScreenID: 7, Type: "install_apk",
+		Params: map[string]any{"url": "http://evil/apk.apk"},
+	})
+	if res.OK || dev.installs != 0 {
+		t.Fatalf("%+v", res)
 	}
 }
 

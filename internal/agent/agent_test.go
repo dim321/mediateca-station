@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,8 @@ import (
 )
 
 type fakeHub struct {
+	mu sync.Mutex
+
 	cfg    hub.Config
 	pkg    hub.Package
 	cfgErr error
@@ -66,8 +69,11 @@ func (f *fakeHub) FetchCommands(context.Context, string) (hub.CommandsResponse, 
 }
 
 func (f *fakeHub) PostCommandResults(_ context.Context, results []hub.CommandResult) error {
+	f.mu.Lock()
 	f.commandResults = append(f.commandResults, results...)
-	return f.postResultsErr
+	err := f.postResultsErr
+	f.mu.Unlock()
+	return err
 }
 
 func (f *fakeHub) UploadArtifact(context.Context, string, io.Reader, string) error {
@@ -435,11 +441,14 @@ func TestDrainDrops404AndKeepsNetworkError(t *testing.T) {
 }
 
 type fakeCmdExec struct {
+	mu   sync.Mutex
 	runs []hub.Command
 }
 
 func (f *fakeCmdExec) Run(_ context.Context, cmd hub.Command) hub.CommandResult {
+	f.mu.Lock()
 	f.runs = append(f.runs, cmd)
+	f.mu.Unlock()
 	return hub.CommandResult{CommandID: cmd.ID, OK: true, FinishedAt: time.Now().UTC()}
 }
 
@@ -456,11 +465,52 @@ func TestPollRunsCommandsAndPostsResults(t *testing.T) {
 	a, _ := newTestAgent(t, testCfg(dir), h, &fakePlayer{})
 	a.cmdExec = exec
 	a.poll(context.Background())
-	if len(exec.runs) != 1 || exec.runs[0].ID != "cmd_1" {
-		t.Fatalf("runs %+v", exec.runs)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		exec.mu.Lock()
+		runs := len(exec.runs)
+		exec.mu.Unlock()
+		h.mu.Lock()
+		results := len(h.commandResults)
+		h.mu.Unlock()
+		if runs == 1 && results == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if len(h.commandResults) != 1 || !h.commandResults[0].OK {
-		t.Fatalf("results %+v", h.commandResults)
+	exec.mu.Lock()
+	runs := append([]hub.Command(nil), exec.runs...)
+	exec.mu.Unlock()
+	h.mu.Lock()
+	posted := append([]hub.CommandResult(nil), h.commandResults...)
+	h.mu.Unlock()
+	if len(runs) != 1 || runs[0].ID != "cmd_1" {
+		t.Fatalf("runs %+v", runs)
+	}
+	if len(posted) != 1 || !posted[0].OK {
+		t.Fatalf("results %+v", posted)
+	}
+}
+
+func TestRunCommandsSkipsAlreadyDone(t *testing.T) {
+	dir := t.TempDir()
+	h := &fakeHub{}
+	exec := &fakeCmdExec{}
+	a, _ := newTestAgent(t, testCfg(dir), h, &fakePlayer{})
+	a.cmdExec = exec
+	a.markCommandDone("cmd_1")
+	a.runCommands(context.Background(), []hub.Command{{ID: "cmd_1", ScreenID: 7, Type: "wake"}})
+	exec.mu.Lock()
+	runs := len(exec.runs)
+	exec.mu.Unlock()
+	if runs != 0 {
+		t.Fatalf("runs %d", runs)
+	}
+	h.mu.Lock()
+	results := h.commandResults
+	h.mu.Unlock()
+	if len(results) != 1 || !results[0].OK || results[0].Error == nil || *results[0].Error != "already_done" {
+		t.Fatalf("results %+v", results)
 	}
 }
 

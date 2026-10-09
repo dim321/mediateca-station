@@ -81,7 +81,14 @@ type Agent struct {
 	healthWatcher     *health.Watcher
 	cmdExec           commandRunner
 	startedAt         time.Time
+
+	stateMu      sync.RWMutex
+	doneMu       sync.Mutex
+	doneCmdOrder []string
+	doneCmdSet   map[string]struct{}
 }
+
+const maxDoneCommands = 100
 
 func Run(ctx context.Context, cfg config.File) error {
 	a, err := newAgent(cfg, hub.New(cfg.HubBaseURL, cfg.AgentToken), player.New(), slog.Default())
@@ -184,33 +191,55 @@ func (a *Agent) loop(ctx context.Context) error {
 	teleInterval := a.effectiveTelemetryInterval()
 	tele := time.NewTicker(teleInterval)
 	defer tele.Stop()
+
+	schedule := time.NewTimer(time.Until(a.wake(a.now())))
+	defer schedule.Stop()
+
+	a.poll(ctx)
+	a.tick(ctx)
+	a.drain(ctx)
+
 	for {
-		a.poll(ctx)
-		if next := a.effectiveTelemetryInterval(); next != teleInterval {
-			tele.Stop()
-			teleInterval = next
-			tele = time.NewTicker(teleInterval)
-		}
-		a.tick(ctx)
-		a.drain(ctx)
-		timer := time.NewTimer(time.Until(a.wake(a.now())))
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return nil
 		case <-poll.C:
-			timer.Stop()
+			a.poll(ctx)
+			if next := a.effectiveTelemetryInterval(); next != teleInterval {
+				tele.Stop()
+				teleInterval = next
+				tele = time.NewTicker(teleInterval)
+			}
+			a.tick(ctx)
+			a.drain(ctx)
+			resetScheduleTimer(schedule, a.wake(a.now()))
 		case <-tele.C:
-			timer.Stop()
-			a.postTelemetry(ctx)
-		case <-timer.C:
+			go a.postTelemetry(ctx)
+		case <-schedule.C:
+			a.tick(ctx)
+			a.drain(ctx)
+			resetScheduleTimer(schedule, a.wake(a.now()))
 		}
 	}
 }
 
+func resetScheduleTimer(t *time.Timer, wakeAt time.Time) {
+	next := time.Until(wakeAt)
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+	t.Reset(next)
+}
+
 func (a *Agent) effectiveTelemetryInterval() time.Duration {
-	if a.telemetryInterval > 0 {
-		return a.telemetryInterval
+	a.stateMu.RLock()
+	interval := a.telemetryInterval
+	a.stateMu.RUnlock()
+	if interval > 0 {
+		return interval
 	}
 	_, _, d := health.TVMonitorSettings(nil)
 	return d
@@ -282,13 +311,69 @@ func (a *Agent) pollCommands(ctx context.Context) {
 	if len(resp.Commands) == 0 {
 		return
 	}
+	commands := append([]hub.Command(nil), resp.Commands...)
+	go a.runCommands(context.WithoutCancel(ctx), commands)
+}
+
+func (a *Agent) runCommands(ctx context.Context, commands []hub.Command) {
 	exec := a.commandExecutor()
-	results := make([]hub.CommandResult, 0, len(resp.Commands))
-	for _, cmd := range resp.Commands {
-		results = append(results, exec.Run(ctx, cmd))
+	results := make([]hub.CommandResult, 0, len(commands))
+	for _, cmd := range commands {
+		if a.commandAlreadyDone(cmd.ID) {
+			msg := "already_done"
+			results = append(results, hub.CommandResult{
+				CommandID:  cmd.ID,
+				OK:         true,
+				Error:      &msg,
+				FinishedAt: time.Now().UTC(),
+			})
+			continue
+		}
+		res := exec.Run(ctx, cmd)
+		results = append(results, res)
 	}
 	if err := a.hub.PostCommandResults(ctx, results); errors.Is(err, hub.ErrUnauthorized) {
 		a.pauseToken()
+		return
+	} else if err != nil {
+		a.log.Error("hub command_results", "err", err.Error())
+		return
+	}
+	for _, res := range results {
+		if res.OK && (res.Error == nil || *res.Error != "already_done") {
+			a.markCommandDone(res.CommandID)
+		}
+	}
+}
+
+func (a *Agent) commandAlreadyDone(id string) bool {
+	a.doneMu.Lock()
+	defer a.doneMu.Unlock()
+	if a.doneCmdSet == nil {
+		return false
+	}
+	_, ok := a.doneCmdSet[id]
+	return ok
+}
+
+func (a *Agent) markCommandDone(id string) {
+	if id == "" {
+		return
+	}
+	a.doneMu.Lock()
+	defer a.doneMu.Unlock()
+	if a.doneCmdSet == nil {
+		a.doneCmdSet = map[string]struct{}{}
+	}
+	if _, ok := a.doneCmdSet[id]; ok {
+		return
+	}
+	a.doneCmdOrder = append(a.doneCmdOrder, id)
+	a.doneCmdSet[id] = struct{}{}
+	for len(a.doneCmdOrder) > maxDoneCommands {
+		oldest := a.doneCmdOrder[0]
+		a.doneCmdOrder = a.doneCmdOrder[1:]
+		delete(a.doneCmdSet, oldest)
 	}
 }
 
@@ -735,9 +820,12 @@ func (a *Agent) logOnce(key string, fn func()) {
 
 func (a *Agent) applyTVMonitor(cfg hub.Config) {
 	_, _, telemetry := health.TVMonitorSettings(cfg.TVMonitor)
+	a.stateMu.Lock()
 	a.telemetryInterval = telemetry
-	if a.healthWatcher != nil {
-		a.healthWatcher.ApplyTVMonitor(cfg.TVMonitor)
+	hw := a.healthWatcher
+	a.stateMu.Unlock()
+	if hw != nil {
+		hw.ApplyTVMonitor(cfg.TVMonitor)
 	}
 }
 
@@ -746,17 +834,20 @@ func (a *Agent) runHealthWatcher(ctx context.Context) {
 	for _, screen := range a.cfg.Screens {
 		ids = append(ids, screen.ScreenID)
 	}
-	w := &health.Watcher{
-		OnAir:           a.screenOnAir,
-		StartedRecently: a.screenStartedRecently,
-		Client:          a.tvHealthClient,
-	}
+	w := health.NewWatcher()
+	w.OnAir = a.screenOnAir
+	w.StartedRecently = a.screenStartedRecently
+	w.Client = a.tvHealthClient
+	a.stateMu.Lock()
 	a.healthWatcher = w
+	a.stateMu.Unlock()
 	if a.hubCfg != nil {
 		a.applyTVMonitor(*a.hubCfg)
 	} else {
 		_, _, telemetry := health.TVMonitorSettings(nil)
+		a.stateMu.Lock()
 		a.telemetryInterval = telemetry
+		a.stateMu.Unlock()
 		w.ApplyTVMonitor(nil)
 	}
 	if err := w.Run(ctx, ids); err != nil && ctx.Err() == nil {

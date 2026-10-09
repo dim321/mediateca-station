@@ -198,10 +198,12 @@ func (c *Client) PostTelemetry(ctx context.Context, tel Telemetry) error {
 	if resp.StatusCode == http.StatusUnauthorized {
 		return ErrUnauthorized
 	}
-	if resp.StatusCode != http.StatusAccepted {
+	switch resp.StatusCode {
+	case http.StatusAccepted, http.StatusNoContent:
+		return nil
+	default:
 		return fmt.Errorf("hub telemetry: status %d", resp.StatusCode)
 	}
-	return nil
 }
 
 func (c *Client) FetchCommands(ctx context.Context, ifNoneMatch string) (CommandsResponse, error) {

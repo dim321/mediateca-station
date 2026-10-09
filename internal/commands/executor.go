@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"sync"
 	"time"
@@ -85,13 +86,19 @@ func (e *Executor) Run(ctx context.Context, cmd hub.Command) (res hub.CommandRes
 	case "sleep":
 		err = dev.Sleep(ctx)
 	case "screenshot":
+		if paramString(cmd.Params, "upload_url") == "" {
+			return failResult(cmd.ID, "missing_upload_url")
+		}
 		var data []byte
 		data, err = dev.Screenshot(ctx)
 		if err == nil {
-			err = e.maybeUpload(ctx, cmd.Params, data, "image/png")
+			err = e.uploadBytes(ctx, cmd.Params, data, "image/png")
 		}
 	case "record":
-		sec := paramInt(cmd.Params, "seconds", 10)
+		if paramString(cmd.Params, "upload_url") == "" {
+			return failResult(cmd.ID, "missing_upload_url")
+		}
+		sec := clampRecordSeconds(paramInt(cmd.Params, "seconds", 10))
 		dest, tmp, tmpErr := tempFile("record-*.mp4")
 		if tmpErr != nil {
 			return failResult(cmd.ID, tmpErr.Error())
@@ -142,22 +149,16 @@ func (e *Executor) apkPath() string {
 }
 
 func (e *Executor) uploadRecordedFile(ctx context.Context, params map[string]any, dest string) error {
-	url := paramString(params, "upload_url")
-	if url == "" {
-		return nil
-	}
-	return e.uploadFile(ctx, url, dest, "video/mp4")
+	uploadURL := paramString(params, "upload_url")
+	return e.uploadFile(ctx, uploadURL, dest, "video/mp4")
 }
 
-func (e *Executor) maybeUpload(ctx context.Context, params map[string]any, data []byte, contentType string) error {
-	url := paramString(params, "upload_url")
-	if url == "" {
-		return nil
-	}
+func (e *Executor) uploadBytes(ctx context.Context, params map[string]any, data []byte, contentType string) error {
+	uploadURL := paramString(params, "upload_url")
 	if e.Upload == nil {
 		return fmt.Errorf("upload not configured")
 	}
-	return e.Upload(ctx, url, bytes.NewReader(data), contentType)
+	return e.Upload(ctx, uploadURL, bytes.NewReader(data), contentType)
 }
 
 func (e *Executor) uploadFile(ctx context.Context, uploadURL, path, contentType string) error {
@@ -174,6 +175,10 @@ func (e *Executor) uploadFile(ctx context.Context, uploadURL, path, contentType 
 
 func (e *Executor) resolveAPK(ctx context.Context, params map[string]any) (path string, remove bool, err error) {
 	if u := paramString(params, "url"); u != "" {
+		parsed, parseErr := url.Parse(u)
+		if parseErr != nil || parsed.Scheme != "https" || parsed.Host == "" {
+			return "", false, fmt.Errorf("install_apk url must be https")
+		}
 		dest, _, err := tempFile("apk-*.apk")
 		if err != nil {
 			return "", false, err
@@ -210,6 +215,16 @@ func paramString(params map[string]any, key string) string {
 	default:
 		return fmt.Sprint(v)
 	}
+}
+
+func clampRecordSeconds(sec int) int {
+	if sec < 1 {
+		return 1
+	}
+	if sec > 120 {
+		return 120
+	}
+	return sec
 }
 
 func paramInt(params map[string]any, key string, def int) int {

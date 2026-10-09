@@ -56,15 +56,21 @@ type Watcher struct {
 	reconfig chan struct{}
 }
 
+func NewWatcher() *Watcher {
+	return &Watcher{reconfig: make(chan struct{}, 1)}
+}
+
 func (w *Watcher) ApplyTVMonitor(tm *hub.TVMonitor) {
 	interval, auto, _ := TVMonitorSettings(tm)
 	w.mu.Lock()
+	changed := w.Interval != interval || w.AutoRestart != auto
 	w.Interval = interval
 	w.AutoRestart = auto
+	reconfig := w.reconfig
 	w.mu.Unlock()
-	if w.reconfig != nil {
+	if changed && reconfig != nil {
 		select {
-		case w.reconfig <- struct{}{}:
+		case reconfig <- struct{}{}:
 		default:
 		}
 	}
