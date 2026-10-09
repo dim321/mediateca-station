@@ -127,6 +127,11 @@ func openFifoWriter(path string, timeout time.Duration) (*os.File, error) {
 	for {
 		f, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0)
 		if err == nil {
+			// Clear O_NONBLOCK so paced writes are not EAGAIN under backpressure.
+			if err := syscall.SetNonblock(int(f.Fd()), false); err != nil {
+				_ = f.Close()
+				return nil, err
+			}
 			return f, nil
 		}
 		lastErr = err
