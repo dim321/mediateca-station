@@ -99,9 +99,7 @@ func (e *Executor) Run(ctx context.Context, cmd hub.Command) (res hub.CommandRes
 		defer os.Remove(tmp)
 		err = dev.Record(ctx, sec, dest)
 		if err == nil {
-			if uploadURL := paramString(cmd.Params, "upload_url"); uploadURL != "" {
-				err = e.uploadFile(ctx, uploadURL, dest, "video/mp4")
-			}
+			err = e.uploadRecordedFile(ctx, cmd.Params, dest)
 		}
 	case "ensure_app":
 		apk := e.apkPath()
@@ -141,6 +139,14 @@ func (e *Executor) apkPath() string {
 		return e.APKPath()
 	}
 	return ""
+}
+
+func (e *Executor) uploadRecordedFile(ctx context.Context, params map[string]any, dest string) error {
+	url := paramString(params, "upload_url")
+	if url == "" {
+		return nil
+	}
+	return e.uploadFile(ctx, url, dest, "video/mp4")
 }
 
 func (e *Executor) maybeUpload(ctx context.Context, params map[string]any, data []byte, contentType string) error {

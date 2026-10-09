@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -77,7 +78,7 @@ func (f *fakeDev) Record(_ context.Context, seconds int, dest string) error {
 	f.records++
 	f.recordSec = seconds
 	f.recordDest = dest
-	return nil
+	return os.WriteFile(dest, []byte("mp4"), 0o644)
 }
 
 func (f *fakeDev) EnsureApp(context.Context, AgentClient, string) error {
@@ -155,6 +156,38 @@ func TestExecutorWakeSleep(t *testing.T) {
 	}
 	if res := ex.Run(context.Background(), hub.Command{ID: "s", ScreenID: 7, Type: "sleep"}); !res.OK || dev.sleeps != 1 {
 		t.Fatalf("sleep %+v", res)
+	}
+}
+
+func TestExecutorRecord(t *testing.T) {
+	dev := &fakeDev{}
+	ex := testExecutor(&fakeTV{}, dev)
+	res := ex.Run(context.Background(), hub.Command{
+		ID: "c1", ScreenID: 7, Type: "record",
+		Params: map[string]any{"seconds": float64(5)},
+	})
+	if !res.OK || dev.records != 1 || dev.recordSec != 5 || dev.recordDest == "" {
+		t.Fatalf("%+v records=%d sec=%d dest=%q", res, dev.records, dev.recordSec, dev.recordDest)
+	}
+}
+
+func TestExecutorRecordUpload(t *testing.T) {
+	dev := &fakeDev{}
+	var uploaded bytes.Buffer
+	ex := testExecutor(&fakeTV{}, dev)
+	ex.Upload = func(_ context.Context, url string, r io.Reader, ct string) error {
+		if url != "https://hub/video" || ct != "video/mp4" {
+			t.Fatalf("url=%q ct=%q", url, ct)
+		}
+		_, err := io.Copy(&uploaded, r)
+		return err
+	}
+	res := ex.Run(context.Background(), hub.Command{
+		ID: "c1", ScreenID: 7, Type: "record",
+		Params: map[string]any{"upload_url": "https://hub/video", "seconds": 3},
+	})
+	if !res.OK || dev.records != 1 || uploaded.String() != "mp4" {
+		t.Fatalf("%+v body=%q", res, uploaded.String())
 	}
 }
 
