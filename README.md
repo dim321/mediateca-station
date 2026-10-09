@@ -170,6 +170,53 @@ can reach `broadcast_bind` on each `stream_port`.
    failed` or repeated `skip` for that entry).
 3. In the Hub, confirm a play event for that screen and media asset.
 
+## Hub control plane (M2)
+
+On the Voxel path, station still polls config and package and drains
+`play_events`. Hub must also expose the M2 agent routes (Bearer token, same as
+today):
+
+| Method | Path |
+| --- | --- |
+| `POST` | `/api/agent/v1/telemetry` |
+| `GET` | `/api/agent/v1/commands` |
+| `POST` | `/api/agent/v1/command_results` |
+
+Hub config may include `tv_monitor` (`health_interval_seconds`,
+`auto_restart_when_not_playing`, `telemetry_interval_seconds`). Normative JSON
+examples and status codes are in the English integration spec:
+[`docs/superpowers/specs/2026-10-09-station-voxel-integration-design.md`](docs/superpowers/specs/2026-10-09-station-voxel-integration-design.md).
+
+### Command types
+
+Per-screen commands (`screen_id` required). Full params and Hub behaviour are
+in the spec; station maps types as follows:
+
+| type | params | station action |
+| --- | --- | --- |
+| `start_stream` | optional `url`, `buffer_ms` | Voxel agent start (default URL = channel URL) |
+| `restart_stream` | — | agent restart |
+| `stop` | — | agent stop |
+| `wake` | — | adb wakeup; WOL if still asleep |
+| `sleep` | — | adb sleep |
+| `screenshot` | optional `upload_url` | screencap; PUT bytes if URL set |
+| `record` | `seconds`, optional `upload_url` | screenrecord; PUT file if URL set |
+| `ensure_app` | — | install/launch `voxel_apk` if needed |
+| `install_apk` | optional `url` | download or use local APK; install + launch |
+
+Set **`mac`** on each screen when Hub may send **`wake`** or when health should
+WOL a TV that stays asleep after the adb keyevent. Without `mac`, wake is
+adb-only.
+
+For **`screenshot`** and **`record`**, Hub should put a signed
+**`params.upload_url`** on the command. Station HTTP PUTs the artifact to that
+URL, then posts `command_results` with `ok` / `error` only (no file in the JSON
+body).
+
+HTTP **401** on telemetry or commands pauses telemetry, command polling, and
+`play_events` drain until a later config or package poll succeeds (same rule as
+the existing play reporter). Air from cache continues.
+
 ## Docker
 
 `compose.yaml` runs this process on the Broadcast Hub Compose network
