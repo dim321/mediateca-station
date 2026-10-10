@@ -44,6 +44,7 @@ Rejected:
 | TV ownership | Station fully owns health, wake/sleep, capture, APK |
 | Unused for air | `playlist_player`, `tv_verifier`, `controller`, Voxel `broadcast_schedule` |
 | Hub reachability | Station polls Hub; Hub never dials the mini-PC |
+| NICs | Always at least two: `eth0` TV LAN, `eth1` administration LAN to the Hub |
 | Delivery | M1 air → M2 telemetry/commands; one binary |
 | Source of truth on PC | Station YAML config, not `broadcast.conf` / `stream_config.json` |
 
@@ -73,6 +74,8 @@ Broadcast Hub (Rails)
         bind 192.168.33.1            URL http://192.168.33.1:809x/
 ```
 
+The Hub path is `eth1`. Television traffic and `broadcast` stay on `eth0`.
+
 ### Package responsibilities
 
 | Package | Job |
@@ -93,6 +96,54 @@ Broadcast Hub (Rails)
 
 `api_server` (:8081) on the mini-PC may remain for local ops. It is not on
 station's critical path and must not start/stop air that station owns.
+
+## Network
+
+The location mini-PC always has at least two Ethernet interfaces. They are
+separate planes: Hub traffic does not leave `eth0`, and television traffic
+does not leave `eth1`.
+
+| Interface | Role | Address | MAC |
+| --- | --- | --- | --- |
+| `eth0` | Television LAN | `192.168.33.1/24` | `e8:ff:1e:dc:23:56` |
+| `eth1` | Administration LAN, path to Broadcast Hub | `192.168.1.204/24` | `d0:37:45:78:7e:61` |
+
+Both are up (`UP,BROADCAST,RUNNING,MULTICAST`), MTU 1500, txqueuelen 1000.
+
+### eth0 — televisions
+
+The television subnet is plugged into `eth0`:
+
+```text
+eth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
+        inet 192.168.33.1  netmask 255.255.255.0  broadcast 192.168.33.255
+        ether e8:ff:1e:dc:23:56  txqueuelen 1000  (Ethernet)
+```
+
+- Subnet `192.168.33.0/24`. The mini-PC address on this plane is `192.168.33.1`.
+- Every television is on this subnet and receives a fixed address by DHCP
+  from `192.168.33.0/24`.
+- The DHCP service runs on the mini-PC (`dnsmasq`). It is a host service,
+  not a process inside station.
+- Addresses of connected televisions are in `/var/lib/misc/dnsmasq.leases`.
+- `broadcast` binds `broadcast_bind` (`192.168.33.1`). Stream URLs, the Voxel
+  agent (`:8989`), and ADB use addresses from this subnet.
+
+### eth1 — administration
+
+`eth1` is the administration network through which the mini-PC talks to
+Broadcast Hub:
+
+```text
+eth1: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
+        inet 192.168.1.204  netmask 255.255.255.0  broadcast 192.168.1.255
+        ether d0:37:45:78:7e:61  txqueuelen 1000  (Ethernet)
+```
+
+- Subnet `192.168.1.0/24`. The mini-PC address on this plane is `192.168.1.204`.
+- Station reaches the Hub through this interface: config, package, media
+  download, play events, and (M2) telemetry, commands, and command results.
+- The Hub never dials the mini-PC.
 
 ## Config
 
@@ -336,7 +387,9 @@ Per-screen mutex. Timeouts: 5s for agent HTTP; 15s for adb install / record.
 | Record | `adb shell screenrecord --time-limit N …` + pull |
 | ensure_app | if agent down: `adb install -r voxel_apk` + start MainActivity |
 
-`adb_serial` host part is the TV IP for agent URLs.
+`adb_serial` host part is the TV's fixed DHCP address on `192.168.33.0/24`
+(see Network; live table `/var/lib/misc/dnsmasq.leases`). That host is the
+IP used in agent URLs.
 
 ## Health
 

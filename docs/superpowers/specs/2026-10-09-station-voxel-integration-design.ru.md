@@ -50,6 +50,7 @@ plane Hub).
 | Владение ТВ | Station полностью: health, wake/sleep, capture, APK |
 | Не используется в эфире | `playlist_player`, `tv_verifier`, `controller`, Voxel `broadcast_schedule` |
 | Доступность Hub | Station опрашивает Hub; Hub никогда не звонит на mini-PC |
+| NIC | Всегда минимум два: `eth0` LAN телевизоров, `eth1` сеть администрирования к Hub |
 | Поставка | M1 эфир → M2 telemetry/commands; один бинарник |
 | Источник правды на ПК | YAML-конфиг station, не `broadcast.conf` / `stream_config.json` |
 
@@ -79,6 +80,8 @@ Broadcast Hub (Rails)
         bind 192.168.33.1            URL http://192.168.33.1:809x/
 ```
 
+Путь к Hub — `eth1`. Трафик телевизоров и `broadcast` остаются на `eth0`.
+
 ### Ответственность пакетов
 
 | Пакет | Задача |
@@ -99,6 +102,53 @@ Broadcast Hub (Rails)
 
 `api_server` (:8081) на mini-PC может остаться для локального ops. Он не в
 критическом пути station и не должен start/stop эфир, которым владеет station.
+
+## Сеть
+
+На mini-PC площадки всегда минимум два Ethernet-интерфейса. Это разные
+плоскости: трафик Hub не уходит с `eth0`, трафик телевизоров не уходит с `eth1`.
+
+| Интерфейс | Роль | Адрес | MAC |
+| --- | --- | --- | --- |
+| `eth0` | LAN телевизоров | `192.168.33.1/24` | `e8:ff:1e:dc:23:56` |
+| `eth1` | Сеть администрирования, путь к Broadcast Hub | `192.168.1.204/24` | `d0:37:45:78:7e:61` |
+
+Оба подняты (`UP,BROADCAST,RUNNING,MULTICAST`), MTU 1500, txqueuelen 1000.
+
+### eth0 — телевизоры
+
+Подсеть с телевизорами включена в `eth0`:
+
+```text
+eth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
+        inet 192.168.33.1  netmask 255.255.255.0  broadcast 192.168.33.255
+        ether e8:ff:1e:dc:23:56  txqueuelen 1000  (Ethernet)
+```
+
+- Подсеть `192.168.33.0/24`. Адрес mini-PC на этой плоскости — `192.168.33.1`.
+- Каждый телевизор в этой подсети и получает фиксированный адрес по DHCP
+  из `192.168.33.0/24`.
+- Сервис DHCP работает на mini-PC (`dnsmasq`). Это сервис хоста, не процесс
+  внутри station.
+- Адреса подключённых телевизоров — в `/var/lib/misc/dnsmasq.leases`.
+- `broadcast` биндится на `broadcast_bind` (`192.168.33.1`). URL потока, агент
+  Voxel (`:8989`) и ADB используют адреса из этой подсети.
+
+### eth1 — администрирование
+
+`eth1` — сеть администрирования, через которую mini-PC взаимодействует с
+Broadcast Hub:
+
+```text
+eth1: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
+        inet 192.168.1.204  netmask 255.255.255.0  broadcast 192.168.1.255
+        ether d0:37:45:78:7e:61  txqueuelen 1000  (Ethernet)
+```
+
+- Подсеть `192.168.1.0/24`. Адрес mini-PC на этой плоскости — `192.168.1.204`.
+- Station ходит в Hub через этот интерфейс: config, package, скачивание медиа,
+  play events и (M2) telemetry, commands, command results.
+- Hub никогда не звонит на mini-PC.
 
 ## Конфиг
 
@@ -346,7 +396,9 @@ Mutex на экран. Таймауты: 5с для HTTP агента; 15с дл
 | Record | `adb shell screenrecord --time-limit N …` + pull |
 | ensure_app | если агент down: `adb install -r voxel_apk` + start MainActivity |
 
-Хост в `adb_serial` — IP ТВ для URL агента.
+Хост в `adb_serial` — фиксированный DHCP-адрес ТВ в `192.168.33.0/24`
+(см. «Сеть»; живая таблица `/var/lib/misc/dnsmasq.leases`). Этот хост —
+IP в URL агента.
 
 ## Health
 
