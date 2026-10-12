@@ -3,6 +3,10 @@
 # starts the station. A mounted config at STATION_CONFIG is used as-is.
 set -eu
 
+# shellcheck disable=SC1091
+. /usr/local/lib/devnet.sh
+align_station_nics
+
 config_path="${STATION_CONFIG:-/etc/mediateca-station/config.yaml}"
 
 if [ -f "$config_path" ]; then
@@ -23,7 +27,7 @@ if [ "$SCREEN_ID" -eq 0 ]; then
   exit 1
 fi
 
-http_listen="${HTTP_LISTEN:-0.0.0.0:8080}"
+http_listen="${HTTP_LISTEN:-192.168.33.1:8080}"
 http_public="${HTTP_PUBLIC:-}"
 http_secret="${HTTP_SECRET:-dev-only-http-secret-not-for-production}"
 if [ "${#http_secret}" -lt 32 ]; then
@@ -34,24 +38,45 @@ fi
 poll_interval="${POLL_INTERVAL:-15s}"
 late_threshold="${LATE_THRESHOLD:-2s}"
 data_dir="${DATA_DIR:-/var/lib/mediateca-station}"
-adb_serial="${ADB_SERIAL:-tv:5555}"
+adb_serial="${ADB_SERIAL:-192.168.33.182:5555}"
 
-# http_listen is the bind address (0.0.0.0 inside the container). The Android
-# emulator has to open a real address. When the tv service is on the lan
-# network, advertise this container's address on that network.
-if [ -z "$http_public" ]; then
-  tv_ip=$(getent ahostsv4 tv 2>/dev/null | awk '{ print $1; exit }')
-  if [ -n "$tv_ip" ]; then
-    src=$(ip route get "$tv_ip" | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')
-    if [ -n "$src" ]; then
-      http_public="${src}:${http_listen##*:}"
+# Televisions live on eth0 (192.168.33.0/24). Advertise and bind that address.
+# Do not bind 0.0.0.0: that would also serve clips on eth1, the Hub plane.
+tv_host=$(serial_host "$adb_serial")
+tv_ip=""
+case "$tv_host" in
+  *.*.*.*) tv_ip=$tv_host ;;
+  *) tv_ip=$(getent ahostsv4 "$tv_host" 2>/dev/null | awk '{ print $1; exit }') ;;
+esac
+if [ -n "$tv_ip" ]; then
+  src=$(ip route get "$tv_ip" | awk '{
+    for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit }
+  }')
+  if [ -z "$src" ]; then
+    echo "station: no route to television ${tv_ip}" >&2
+    exit 1
+  fi
+  if in_tv_subnet "$tv_ip" && ! in_tv_subnet "$src"; then
+    echo "station: route to television ${tv_ip} uses ${src}, not eth0" >&2
+    exit 1
+  fi
+  http_listen=$(listen_on_plane "$http_listen" "$src")
+  if [ -z "$http_public" ]; then
+    http_public="${src}:${http_listen##*:}"
+  fi
+  if in_tv_subnet "$tv_ip"; then
+    pub_host=${http_public%:*}
+    listen_host=${http_listen%:*}
+    if ! in_tv_subnet "$pub_host" || ! in_tv_subnet "$listen_host"; then
+      echo "station: media address must be on 192.168.33.0/24 (listen ${http_listen}, public ${http_public})" >&2
+      exit 1
     fi
   fi
 fi
 
 # Development HostAuthorization allows IP literals and rejects the Compose
 # name "web" (403). Leave HUB_BASE_URL unset so the station calls the hub
-# container by the address it has on mediateca_broadcast_default.
+# container by the address it has on mediateca_broadcast_default (eth1).
 if [ -n "${HUB_BASE_URL:-}" ]; then
   hub_base_url="$HUB_BASE_URL"
 else
@@ -62,6 +87,13 @@ else
     exit 1
   fi
   hub_base_url="http://${hub_ip}:3000"
+  hub_src=$(ip route get "$hub_ip" | awk '{
+    for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit }
+  }')
+  if in_tv_subnet "$hub_src"; then
+    echo "station: route to Hub ${hub_ip} uses television address ${hub_src}" >&2
+    exit 1
+  fi
 fi
 
 yaml_escape() {

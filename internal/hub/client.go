@@ -20,10 +20,60 @@ type Screen struct {
 	Orientation string `json:"orientation"`
 }
 
+type TVMonitor struct {
+	HealthIntervalSeconds     int  `json:"health_interval_seconds"`
+	AutoRestartWhenNotPlaying bool `json:"auto_restart_when_not_playing"`
+	TelemetryIntervalSeconds  int  `json:"telemetry_interval_seconds"`
+}
+
 type Config struct {
-	StationID         int      `json:"station_id"`
-	OfflineCacheHours int      `json:"offline_cache_hours"`
-	Screens           []Screen `json:"screens"`
+	StationID         int        `json:"station_id"`
+	OfflineCacheHours int        `json:"offline_cache_hours"`
+	Screens           []Screen   `json:"screens"`
+	TVMonitor         *TVMonitor `json:"tv_monitor"`
+}
+
+type Telemetry struct {
+	ReportedAt time.Time         `json:"reported_at"`
+	Station    StationTelemetry  `json:"station"`
+	Screens    []ScreenTelemetry `json:"screens"`
+}
+
+type StationTelemetry struct {
+	UptimeSeconds int    `json:"uptime_seconds"`
+	PackageETag   string `json:"package_etag"`
+	BroadcastOK   bool   `json:"broadcast_ok"`
+}
+
+type ScreenTelemetry struct {
+	ScreenID         int     `json:"screen_id"`
+	Reachable        bool    `json:"reachable"`
+	AgentOK          bool    `json:"agent_ok"`
+	Playing          bool    `json:"playing"`
+	URL              string  `json:"url"`
+	Wakefulness      string  `json:"wakefulness"`
+	StreamPort       int     `json:"stream_port"`
+	BroadcastClients int     `json:"broadcast_clients"`
+	LastError        *string `json:"last_error"`
+}
+
+type Command struct {
+	ID       string         `json:"id"`
+	ScreenID int            `json:"screen_id"`
+	Type     string         `json:"type"`
+	Params   map[string]any `json:"params"`
+	IssuedAt string         `json:"issued_at"`
+}
+
+type CommandsResponse struct {
+	Commands []Command `json:"commands"`
+}
+
+type CommandResult struct {
+	CommandID  string    `json:"command_id"`
+	OK         bool      `json:"ok"`
+	Error      *string   `json:"error"`
+	FinishedAt time.Time `json:"finished_at"`
 }
 
 type Media struct {
@@ -133,6 +183,90 @@ func (c *Client) PostPlayEvent(ctx context.Context, screenID, mediaID int, start
 		return resp.StatusCode, "", err
 	}
 	return resp.StatusCode, string(body), nil
+}
+
+func (c *Client) PostTelemetry(ctx context.Context, tel Telemetry) error {
+	raw, err := json.Marshal(tel)
+	if err != nil {
+		return err
+	}
+	resp, err := c.do(ctx, http.MethodPost, "/api/agent/v1/telemetry", "", raw)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return ErrUnauthorized
+	}
+	switch resp.StatusCode {
+	case http.StatusAccepted, http.StatusNoContent:
+		return nil
+	default:
+		return fmt.Errorf("hub telemetry: status %d", resp.StatusCode)
+	}
+}
+
+func (c *Client) FetchCommands(ctx context.Context, ifNoneMatch string) (CommandsResponse, error) {
+	resp, err := c.do(ctx, http.MethodGet, "/api/agent/v1/commands", ifNoneMatch, nil)
+	if err != nil {
+		return CommandsResponse{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return CommandsResponse{}, ErrUnauthorized
+	}
+	if resp.StatusCode == http.StatusNotModified {
+		return CommandsResponse{}, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return CommandsResponse{}, fmt.Errorf("hub commands: status %d", resp.StatusCode)
+	}
+	var out CommandsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return CommandsResponse{}, err
+	}
+	return out, nil
+}
+
+func (c *Client) PostCommandResults(ctx context.Context, results []CommandResult) error {
+	raw, err := json.Marshal(map[string]any{"results": results})
+	if err != nil {
+		return err
+	}
+	resp, err := c.do(ctx, http.MethodPost, "/api/agent/v1/command_results", "", raw)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return ErrUnauthorized
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("hub command_results: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (c *Client) UploadArtifact(ctx context.Context, uploadURL string, r io.Reader, contentType string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, r)
+	if err != nil {
+		return err
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return ErrUnauthorized
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("hub upload: status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (c *Client) do(ctx context.Context, method, path, ifNoneMatch string, body []byte) (*http.Response, error) {

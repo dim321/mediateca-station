@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -106,5 +107,111 @@ func TestPostPlayEventTransportError(t *testing.T) {
 	status, _, err := client.PostPlayEvent(context.Background(), 7, 19, time.Now().UTC())
 	if err == nil || status != 0 {
 		t.Fatalf("status=%d err=%v", status, err)
+	}
+}
+
+func TestFetchConfigTVMonitor(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"station_id":3,"offline_cache_hours":24,"screens":[],"tv_monitor":{"health_interval_seconds":45,"auto_restart_when_not_playing":false,"telemetry_interval_seconds":90}}`)
+	}))
+	defer srv.Close()
+	cfg, err := New(srv.URL, "tok").FetchConfig(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TVMonitor == nil || cfg.TVMonitor.HealthIntervalSeconds != 45 ||
+		cfg.TVMonitor.AutoRestartWhenNotPlaying || cfg.TVMonitor.TelemetryIntervalSeconds != 90 {
+		t.Fatalf("%+v", cfg.TVMonitor)
+	}
+}
+
+func TestPostTelemetry(t *testing.T) {
+	var got Telemetry
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/agent/v1/telemetry" {
+			t.Fatalf("%s", r.URL.Path)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "tok")
+	c.HTTP = srv.Client()
+	err := c.PostTelemetry(context.Background(), Telemetry{
+		ReportedAt: time.Date(2026, 10, 9, 11, 0, 0, 0, time.UTC),
+		Station:    StationTelemetry{UptimeSeconds: 10, BroadcastOK: true},
+		Screens:    []ScreenTelemetry{{ScreenID: 7, Playing: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Screens[0].ScreenID != 7 {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestPostTelemetry204(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "tok")
+	c.HTTP = srv.Client()
+	if err := c.PostTelemetry(context.Background(), Telemetry{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFetchCommands(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/agent/v1/commands" {
+			t.Fatal(r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(CommandsResponse{Commands: []Command{{
+			ID: "cmd_1", ScreenID: 7, Type: "restart_stream", IssuedAt: "2026-10-09T11:01:00Z",
+		}}})
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "tok")
+	c.HTTP = srv.Client()
+	list, err := c.FetchCommands(context.Background(), "")
+	if err != nil || len(list.Commands) != 1 || list.Commands[0].Type != "restart_stream" {
+		t.Fatalf("%v %+v", err, list)
+	}
+}
+
+func TestPostCommandResults(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/agent/v1/command_results" {
+			t.Fatal(r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "tok")
+	c.HTTP = srv.Client()
+	if err := c.PostCommandResults(context.Background(), []CommandResult{{
+		CommandID: "cmd_1", OK: true, FinishedAt: time.Now().UTC(),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUploadArtifact(t *testing.T) {
+	var method, ct string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method = r.Method
+		ct = r.Header.Get("Content-Type")
+		io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "tok")
+	c.HTTP = srv.Client()
+	if err := c.UploadArtifact(context.Background(), srv.URL+"/upload", strings.NewReader("png-bytes"), "image/png"); err != nil {
+		t.Fatal(err)
+	}
+	if method != http.MethodPut || ct != "image/png" {
+		t.Fatalf("method=%s ct=%s", method, ct)
 	}
 }

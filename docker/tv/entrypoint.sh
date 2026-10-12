@@ -12,10 +12,13 @@ export USER=root
 memory="${EMULATOR_MEMORY:-2048}"
 cores="${EMULATOR_CORES:-2}"
 lan_ip=$(ip -4 addr show eth0 | awk '/inet / { sub(/\/.*/, "", $2); print $2; exit }')
-if [ -z "$lan_ip" ]; then
-  echo "tv: eth0 has no address" >&2
-  exit 1
-fi
+case "$lan_ip" in
+  192.168.33.*) ;;
+  *)
+    echo "tv: eth0 is ${lan_ip:-down}, want an address in 192.168.33.0/24" >&2
+    exit 1
+    ;;
+esac
 
 emulator \
   -avd tv \

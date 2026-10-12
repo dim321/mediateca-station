@@ -15,8 +15,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/mediateca-station /usr/local/bin/mediateca-station
+COPY docker/devnet.sh /usr/local/lib/devnet.sh
 COPY docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh \
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh /usr/local/lib/devnet.sh \
     && install -d -m 0700 /var/lib/mediateca-station /etc/mediateca-station
 
 EXPOSE 8080

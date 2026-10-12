@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
+	"mediateca-station/internal/air"
 	"mediateca-station/internal/config"
 	"mediateca-station/internal/hub"
 	"mediateca-station/internal/report"
@@ -17,6 +20,8 @@ import (
 )
 
 type fakeHub struct {
+	mu sync.Mutex
+
 	cfg    hub.Config
 	pkg    hub.Package
 	cfgErr error
@@ -24,6 +29,14 @@ type fakeHub struct {
 	notMod bool
 	posts  []int
 	post   int
+
+	commands       []hub.Command
+	fetchCmdErr    error
+	postResultsErr error
+	teleErr        error
+	telePosts      int
+	lastTelemetry  hub.Telemetry
+	commandResults []hub.CommandResult
 }
 
 func (f *fakeHub) FetchConfig(context.Context) (hub.Config, error) {
@@ -40,6 +53,31 @@ func (f *fakeHub) PostPlayEvent(context.Context, int, int, time.Time) (int, stri
 		return 0, "", errors.New("dial")
 	}
 	return f.post, `{"error":"x"}`, nil
+}
+
+func (f *fakeHub) PostTelemetry(_ context.Context, tel hub.Telemetry) error {
+	f.telePosts++
+	f.lastTelemetry = tel
+	return f.teleErr
+}
+
+func (f *fakeHub) FetchCommands(context.Context, string) (hub.CommandsResponse, error) {
+	if f.fetchCmdErr != nil {
+		return hub.CommandsResponse{}, f.fetchCmdErr
+	}
+	return hub.CommandsResponse{Commands: append([]hub.Command(nil), f.commands...)}, nil
+}
+
+func (f *fakeHub) PostCommandResults(_ context.Context, results []hub.CommandResult) error {
+	f.mu.Lock()
+	f.commandResults = append(f.commandResults, results...)
+	err := f.postResultsErr
+	f.mu.Unlock()
+	return err
+}
+
+func (f *fakeHub) UploadArtifact(context.Context, string, io.Reader, string) error {
+	return nil
 }
 
 type fakePlayer struct {
@@ -60,6 +98,22 @@ func (f *fakePlayer) Stop(context.Context, string) error {
 	return nil
 }
 
+type fakeAir struct {
+	starts []air.StartReq
+	stops  int
+	err    error
+}
+
+func (f *fakeAir) Start(_ context.Context, req air.StartReq) error {
+	f.starts = append(f.starts, req)
+	return f.err
+}
+
+func (f *fakeAir) Stop(context.Context, string, int) error {
+	f.stops++
+	return nil
+}
+
 func testCfg(dir string) config.File {
 	return config.File{
 		HubBaseURL:    "https://hub.example",
@@ -70,6 +124,21 @@ func testCfg(dir string) config.File {
 		PollInterval:  time.Minute,
 		DataDir:       dir,
 		Screens:       []config.Screen{{ScreenID: 7, ADBSerial: "192.168.1.21:5555"}},
+	}
+}
+
+func voxelTestCfg(dir string) config.File {
+	return config.File{
+		HubBaseURL:    "https://hub.example",
+		AgentToken:    "super-secret-token",
+		LateThreshold: 2 * time.Second,
+		PollInterval:  time.Minute,
+		DataDir:       dir,
+		BroadcastBin:  "/usr/local/bin/broadcast",
+		BroadcastBind: "192.168.1.10",
+		FifoDir:       filepath.Join(dir, "fifo"),
+		VoxelAPK:      "/opt/voxel.apk",
+		Screens:       []config.Screen{{ScreenID: 7, ADBSerial: "192.168.1.21:5555", StreamPort: 8091}},
 	}
 }
 
@@ -114,6 +183,32 @@ func newTestAgent(t *testing.T, cfg config.File, h *fakeHub, p *fakePlayer) (*Ag
 		t.Fatal(err)
 	}
 	return a, &buf
+}
+
+func TestTickVoxelPathUsesAir(t *testing.T) {
+	dir := t.TempDir()
+	start := time.Date(2026, 9, 2, 2, 0, 0, 0, time.UTC)
+	seedReady(t, dir, 19, "/clip.ts")
+	p := &fakePlayer{}
+	fa := &fakeAir{}
+	a, _ := newTestAgent(t, voxelTestCfg(dir), &fakeHub{}, p)
+	a.air = fa
+	a.now = func() time.Time { return start }
+	a.pkg = ptrPkg(pkgAt(start, 19, []int{7}))
+	a.tick(context.Background())
+	if p.starts != 0 || p.stops != 0 {
+		t.Fatalf("player starts=%d stops=%d", p.starts, p.stops)
+	}
+	if len(fa.starts) != 1 {
+		t.Fatalf("air starts=%d", len(fa.starts))
+	}
+	req := fa.starts[0]
+	if req.ScreenID != 7 || req.Port != 8091 || req.MediaID != 19 || req.Duration != 30*time.Second {
+		t.Fatalf("start req %+v", req)
+	}
+	if !a.queue.Played("7:19:2026-09-02T02:00:00Z") {
+		t.Fatal("played key missing")
+	}
 }
 
 func TestTickStartsAndDoesNotRepeat(t *testing.T) {
@@ -283,6 +378,32 @@ func TestPoll401DoesNotReplacePackage(t *testing.T) {
 	}
 }
 
+func TestApplyTVMonitorFromPoll(t *testing.T) {
+	dir := t.TempDir()
+	h := &fakeHub{cfg: hub.Config{
+		StationID: 1,
+		TVMonitor: &hub.TVMonitor{
+			HealthIntervalSeconds:     45,
+			AutoRestartWhenNotPlaying: false,
+			TelemetryIntervalSeconds:  90,
+		},
+	}}
+	a, _ := newTestAgent(t, voxelTestCfg(dir), h, &fakePlayer{})
+	a.poll(context.Background())
+	if a.telemetryInterval != 90*time.Second {
+		t.Fatalf("telemetry=%v", a.telemetryInterval)
+	}
+}
+
+func TestApplyTVMonitorDefaultsWithoutHubBlock(t *testing.T) {
+	dir := t.TempDir()
+	a, _ := newTestAgent(t, voxelTestCfg(dir), &fakeHub{cfg: hub.Config{StationID: 1}}, &fakePlayer{})
+	a.applyTVMonitor(hub.Config{})
+	if a.telemetryInterval != 60*time.Second {
+		t.Fatalf("telemetry=%v", a.telemetryInterval)
+	}
+}
+
 func TestPollFailureKeepsMedia(t *testing.T) {
 	dir := t.TempDir()
 	seedReady(t, dir, 19, "/clip.ts")
@@ -316,6 +437,138 @@ func TestDrainDrops404AndKeepsNetworkError(t *testing.T) {
 	_, ok, err = a.queue.Peek()
 	if err != nil || !ok {
 		t.Fatalf("network error dropped the event ok=%v err=%v", ok, err)
+	}
+}
+
+type fakeCmdExec struct {
+	mu   sync.Mutex
+	runs []hub.Command
+}
+
+func (f *fakeCmdExec) Run(_ context.Context, cmd hub.Command) hub.CommandResult {
+	f.mu.Lock()
+	f.runs = append(f.runs, cmd)
+	f.mu.Unlock()
+	return hub.CommandResult{CommandID: cmd.ID, OK: true, FinishedAt: time.Now().UTC()}
+}
+
+func TestPollRunsCommandsAndPostsResults(t *testing.T) {
+	dir := t.TempDir()
+	h := &fakeHub{
+		cfg: hub.Config{StationID: 1},
+		pkg: pkgAt(time.Now(), 19, []int{7}),
+		commands: []hub.Command{{
+			ID: "cmd_1", ScreenID: 7, Type: "restart_stream", IssuedAt: "2026-10-09T11:01:00Z",
+		}},
+	}
+	exec := &fakeCmdExec{}
+	a, _ := newTestAgent(t, testCfg(dir), h, &fakePlayer{})
+	a.cmdExec = exec
+	a.poll(context.Background())
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		exec.mu.Lock()
+		runs := len(exec.runs)
+		exec.mu.Unlock()
+		h.mu.Lock()
+		results := len(h.commandResults)
+		h.mu.Unlock()
+		if runs == 1 && results == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	exec.mu.Lock()
+	runs := append([]hub.Command(nil), exec.runs...)
+	exec.mu.Unlock()
+	h.mu.Lock()
+	posted := append([]hub.CommandResult(nil), h.commandResults...)
+	h.mu.Unlock()
+	if len(runs) != 1 || runs[0].ID != "cmd_1" {
+		t.Fatalf("runs %+v", runs)
+	}
+	if len(posted) != 1 || !posted[0].OK {
+		t.Fatalf("results %+v", posted)
+	}
+}
+
+func TestRunCommandsSkipsAlreadyDone(t *testing.T) {
+	dir := t.TempDir()
+	h := &fakeHub{}
+	exec := &fakeCmdExec{}
+	a, _ := newTestAgent(t, testCfg(dir), h, &fakePlayer{})
+	a.cmdExec = exec
+	a.markCommandDone("cmd_1")
+	a.runCommands(context.Background(), []hub.Command{{ID: "cmd_1", ScreenID: 7, Type: "wake"}})
+	exec.mu.Lock()
+	runs := len(exec.runs)
+	exec.mu.Unlock()
+	if runs != 0 {
+		t.Fatalf("runs %d", runs)
+	}
+	h.mu.Lock()
+	results := h.commandResults
+	h.mu.Unlock()
+	if len(results) != 1 || !results[0].OK || results[0].Error == nil || *results[0].Error != "already_done" {
+		t.Fatalf("results %+v", results)
+	}
+}
+
+func TestPollCommands401PausesReporting(t *testing.T) {
+	dir := t.TempDir()
+	h := &fakeHub{
+		cfg:         hub.Config{StationID: 1},
+		notMod:      true,
+		fetchCmdErr: hub.ErrUnauthorized,
+		post:        201,
+	}
+	a, _ := newTestAgent(t, testCfg(dir), h, &fakePlayer{})
+	ev := report.Event{ScreenID: 7, MediaAssetID: 19, StartedAt: time.Now().UTC()}
+	if err := a.queue.Enqueue(ev, "7:19:2026-09-02T02:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	a.poll(context.Background())
+	if !a.reportPaused {
+		t.Fatal("expected paused")
+	}
+	if len(h.posts) != 0 {
+		t.Fatalf("drain ran while paused posts=%d", len(h.posts))
+	}
+}
+
+func TestPostTelemetry401Pauses(t *testing.T) {
+	dir := t.TempDir()
+	h := &fakeHub{teleErr: hub.ErrUnauthorized}
+	a, _ := newTestAgent(t, testCfg(dir), h, &fakePlayer{})
+	a.postTelemetry(context.Background())
+	if !a.reportPaused {
+		t.Fatal("expected paused")
+	}
+}
+
+func TestPostTelemetrySkipsWhenPaused(t *testing.T) {
+	dir := t.TempDir()
+	h := &fakeHub{}
+	a, _ := newTestAgent(t, testCfg(dir), h, &fakePlayer{})
+	a.reportPaused = true
+	a.postTelemetry(context.Background())
+	if h.telePosts != 0 {
+		t.Fatalf("telePosts=%d", h.telePosts)
+	}
+}
+
+func TestBuildTelemetryIncludesScreens(t *testing.T) {
+	dir := t.TempDir()
+	a, _ := newTestAgent(t, testCfg(dir), &fakeHub{}, &fakePlayer{})
+	a.etag = `"v1"`
+	a.now = func() time.Time { return time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC) }
+	a.startedAt = a.now().Add(-10 * time.Second)
+	tel := a.buildTelemetry(context.Background())
+	if tel.Station.PackageETag != `"v1"` || tel.Station.UptimeSeconds != 10 {
+		t.Fatalf("station %+v", tel.Station)
+	}
+	if len(tel.Screens) != 1 || tel.Screens[0].ScreenID != 7 {
+		t.Fatalf("screens %+v", tel.Screens)
 	}
 }
 
