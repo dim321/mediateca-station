@@ -219,18 +219,18 @@ the existing play reporter). Air from cache continues.
 
 ## Docker
 
-`compose.yaml` runs this process on the Broadcast Hub Compose network
-(`mediateca_broadcast_default`) so it can call the hub the way a mini-PC
-would. Start the hub first. Copy `.env.example` to `.env`, set `AGENT_TOKEN`
-and `SCREEN_ID`, then `docker compose up --build`. The entrypoint writes a
-mode-0600 config and calls the hub container by IP, because development
-rejects the hostname `web`.
+Development Compose reproduces the mini-PC's two Ethernet planes.
 
-`docker compose --profile tv up --build` also starts an Android TV 9 emulator
-with VLC. It needs `/dev/kvm`. The station connects to `tv:5555` and serves
-clips on the address VLC can reach. Watch the screen with
-`scrcpy -s emulator-5554`. Host adb names this published port
-`emulator-5554`, not `127.0.0.1:5555`.
+| Plane | Interface | Network | Address |
+| --- | --- | --- | --- |
+| Televisions | `eth0` | `television` `192.168.33.0/24` | station `192.168.33.1`, emulator `192.168.33.182` |
+| Administration, path to Broadcast Hub | `eth1` | external `mediateca_broadcast_default` | assigned by the Hub project |
+
+Hub traffic stays on `eth1`. Clip HTTP and ADB stay on `eth0`. The process binds media on `192.168.33.1:8080` only. From the host that URL is `http://192.168.33.1:8080` through the television bridge.
+
+Start the Hub first. Copy `.env.example` to `.env`, set `AGENT_TOKEN` and `SCREEN_ID`, then `docker compose up --build`. The entrypoint writes a mode-0600 config and calls the hub container by IP, because development rejects the hostname `web`.
+
+`docker compose --profile tv up --build` also starts an Android TV 9 emulator with VLC at `192.168.33.182`. It needs `/dev/kvm`. The station connects to `192.168.33.182:5555`, and VLC opens `http://192.168.33.1:8080/...`. Watch the screen with `scrcpy -s emulator-5554`. Host adb names this published port `emulator-5554`, not `127.0.0.1:5555`.
 
 ## Logs
 
