@@ -11,6 +11,26 @@ export USER=root
 
 memory="${EMULATOR_MEMORY:-2048}"
 cores="${EMULATOR_CORES:-2}"
+
+# Docker assigns an address before this process starts. Drop it and take
+# the one dnsmasq reserves for this container's MAC, as a television does.
+echo "tv: requesting DHCP on eth0"
+ip link set eth0 up
+ip -4 addr flush dev eth0
+ip route del default 2>/dev/null || true
+leased=0
+for _ in $(seq 1 15); do
+  if dhclient -4 -cf /usr/local/lib/dhclient.conf -1 eth0; then
+    leased=1
+    break
+  fi
+  sleep 2
+done
+if [ "$leased" -ne 1 ]; then
+  echo "tv: no DHCP lease on eth0" >&2
+  exit 1
+fi
+
 lan_ip=$(ip -4 addr show eth0 | awk '/inet / { sub(/\/.*/, "", $2); print $2; exit }')
 case "$lan_ip" in
   192.168.33.*) ;;
@@ -19,6 +39,7 @@ case "$lan_ip" in
     exit 1
     ;;
 esac
+echo "tv: leased ${lan_ip}"
 
 emulator \
   -avd tv \

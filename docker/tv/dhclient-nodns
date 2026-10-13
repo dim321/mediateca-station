@@ -1,0 +1,3 @@
+#!/bin/sh
+# Sourced by dhclient-script. Keep Docker's resolver.
+make_resolv_conf() { :; }

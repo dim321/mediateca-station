@@ -27,4 +27,15 @@ got=$(listen_on_plane "0.0.0.0:8080" "192.168.33.1")
 got=$(listen_on_plane "192.168.33.1:8080" "192.168.33.1")
 [ "$got" = "192.168.33.1:8080" ] || fail "explicit listen: $got"
 
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+printf '%s\n' 'port=0' 'dhcp-leasefile=/var/lib/misc/dnsmasq.leases' > "$tmp/src"
+render_dnsmasq_conf "$tmp/src" "$tmp/out" "78:53:33:4b:2c:29" "192.168.33.182"
+grep -q 'dhcp-leasefile=/var/lib/misc/dnsmasq.leases' "$tmp/out" || fail "lease path dropped"
+grep -qx 'dhcp-host=78:53:33:4b:2c:29,192.168.33.182' "$tmp/out" || fail "reservation: $(cat "$tmp/out")"
+render_dnsmasq_conf "$tmp/src" "$tmp/open" "" ""
+if grep -q '^dhcp-host=' "$tmp/open"; then
+  fail "empty reservation should not pin a host"
+fi
+
 echo "devnet helpers ok"

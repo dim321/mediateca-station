@@ -230,7 +230,7 @@ Hub traffic stays on `eth1`. Clip HTTP and ADB stay on `eth0`. The process binds
 
 Start the Hub first. Copy `.env.example` to `.env`, set `AGENT_TOKEN` and `SCREEN_ID`, then `docker compose up --build`. The entrypoint writes a mode-0600 config and calls the hub container by IP, because development rejects the hostname `web`.
 
-`docker compose --profile tv up --build` also starts an Android TV 9 emulator with VLC at `192.168.33.182`. It needs `/dev/kvm`. The station connects to `192.168.33.182:5555`, and VLC opens `http://192.168.33.1:8080/...`. Watch the screen with `scrcpy -s emulator-5554`. Host adb names this published port `emulator-5554`, not `127.0.0.1:5555`.
+`docker compose --profile tv up --build` also starts an Android TV 9 emulator. It needs `/dev/kvm`. dnsmasq in the station container serves DHCP on `eth0` and writes leases to `/var/lib/misc/dnsmasq.leases`. The emulator's MAC `78:53:33:4b:2c:29` is reserved as `192.168.33.182`. The station connects to `192.168.33.182:5555`, and VLC opens `http://192.168.33.1:8080/...`. From the host, `adb connect 192.168.33.182:5555` and `scrcpy -s 192.168.33.182:5555`.
 
 ## Logs
 

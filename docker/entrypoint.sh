@@ -5,7 +5,34 @@ set -eu
 
 # shellcheck disable=SC1091
 . /usr/local/lib/devnet.sh
+
+# dnsmasq is the mini-PC DHCP service, not part of the station process.
+# It must be listening before the television container requests a lease.
+start_television_dhcp() {
+  render_dnsmasq_conf /usr/local/lib/dnsmasq.conf /run/dnsmasq.conf \
+    "${TV_DHCP_MAC:-78:53:33:4b:2c:29}" "${TV_DHCP_IP:-192.168.33.182}"
+  install -d -m 0755 /var/lib/misc
+  dnsmasq -d -C /run/dnsmasq.conf &
+  pid=$!
+  i=0
+  while [ "$i" -lt 25 ]; do
+    if ss -H -lun | grep -q ':67[[:space:]]'; then
+      echo "station: dnsmasq DHCP on eth0, leases /var/lib/misc/dnsmasq.leases" >&2
+      return 0
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "station: dnsmasq exited" >&2
+      exit 1
+    fi
+    i=$((i + 1))
+    sleep 0.2
+  done
+  echo "station: dnsmasq did not bind UDP/67" >&2
+  exit 1
+}
+
 align_station_nics
+start_television_dhcp
 
 config_path="${STATION_CONFIG:-/etc/mediateca-station/config.yaml}"
 
