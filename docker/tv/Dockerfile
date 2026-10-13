@@ -39,8 +39,14 @@ RUN echo no | avdmanager create avd --force \
 
 RUN wget -q -O /opt/vlc.apk "https://get.videolan.org/vlc-android/3.6.5/VLC-Android-3.6.5-x86.apk"
 
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y isc-dhcp-client \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY dhclient.conf /usr/local/lib/dhclient.conf
+COPY dhclient-nodns /etc/dhcp/dhclient-enter-hooks.d/nodns
 COPY entrypoint.sh /usr/local/bin/tv-entrypoint.sh
-RUN chmod 0755 /usr/local/bin/tv-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/tv-entrypoint.sh /etc/dhcp/dhclient-enter-hooks.d/nodns
 
 EXPOSE 5555
 ENTRYPOINT ["/usr/local/bin/tv-entrypoint.sh"]

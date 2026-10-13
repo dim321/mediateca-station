@@ -53,6 +53,21 @@ other_iface() {
   '
 }
 
+# render_dnsmasq_conf SRC DEST MAC IP
+# Copies the television DHCP config and, when MAC and IP are set, pins that
+# client the way the mini-PC pins a television. The lease file path is the
+# production one: /var/lib/misc/dnsmasq.leases.
+render_dnsmasq_conf() {
+  src=$1
+  dest=$2
+  mac=$3
+  ip=$4
+  cp "$src" "$dest"
+  if [ -n "$mac" ] && [ -n "$ip" ]; then
+    printf 'dhcp-host=%s,%s\n' "$mac" "$ip" >> "$dest"
+  fi
+}
+
 align_station_nics() {
   tv_if=$(iface_with_prefix "192.168.33.")
   if [ -z "$tv_if" ]; then
