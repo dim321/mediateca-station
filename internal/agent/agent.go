@@ -103,8 +103,17 @@ func Run(ctx context.Context, cfg config.File) error {
 			return err
 		}
 		a.http = &http.Server{Handler: httpmedia.Handler(cfg.HTTPSecret, a.cache.Open)}
-		go a.http.Serve(ln)
-		defer a.http.Shutdown(context.Background())
+		go func() {
+			err := a.http.Serve(ln)
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				a.log.Error("media http", "err", err.Error())
+			}
+		}()
+		defer func() {
+			if err := a.http.Shutdown(context.Background()); err != nil {
+				a.log.Error("media http shutdown", "err", err.Error())
+			}
+		}()
 	}
 	a.ensureBroadcasts(ctx)
 	if a.air != nil {
@@ -872,7 +881,7 @@ func (a *Agent) runHealthWatcher(ctx context.Context) {
 		a.stateMu.Unlock()
 		w.ApplyTVMonitor(nil)
 	}
-	if err := w.Run(ctx, ids); err != nil && ctx.Err() == nil {
+	if err := w.Run(ctx, ids); ctx.Err() == nil {
 		a.log.Error("health watcher", "err", err.Error())
 	}
 }

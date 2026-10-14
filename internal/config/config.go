@@ -222,12 +222,7 @@ func (f *File) validate(doc fileYAML) error {
 			}
 			seenPorts[screen.StreamPort] = struct{}{}
 		}
-		f.Screens = append(f.Screens, Screen{
-			ScreenID:   screen.ScreenID,
-			ADBSerial:  screen.ADBSerial,
-			StreamPort: screen.StreamPort,
-			MAC:        screen.MAC,
-		})
+		f.Screens = append(f.Screens, Screen(screen))
 	}
 	return nil
 }
