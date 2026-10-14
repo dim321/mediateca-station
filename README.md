@@ -37,6 +37,8 @@ until the clock has stepped.
 go build -o mediateca-station ./cmd/station
 sudo install -m 0755 mediateca-station /usr/local/bin/mediateca-station
 sudo useradd --system --create-home --home-dir /var/lib/mediateca-station mediateca
+sudo groupadd --system dnsmasq-leases
+sudo usermod -a -G dnsmasq-leases mediateca
 sudo install -d -m 0700 -o mediateca -g mediateca /var/lib/mediateca-station
 sudo install -d -m 0750 /etc/mediateca-station
 ```
@@ -75,6 +77,7 @@ ExecStart=/usr/local/bin/mediateca-station -config /etc/mediateca-station/config
 Restart=always
 RestartSec=2
 User=mediateca
+SupplementaryGroups=dnsmasq-leases
 NoNewPrivileges=true
 
 [Install]
@@ -216,6 +219,41 @@ body).
 HTTP **401** on telemetry or commands pauses telemetry, command polling, and
 `play_events` drain until a later config or package poll succeeds (same rule as
 the existing play reporter). Air from cache continues.
+
+### Station command: `fetch_screens`
+
+Hub sends `fetch_screens` with `screen_id: null` and empty `params`. The
+operator starts screen discovery on the Hub. Station does not start ADB, VLC,
+or a screen stream for this command. It reads active DHCP leases and posts
+`command_results`.
+
+The process needs read access to `/var/lib/misc/dnsmasq.leases`. Do not run
+the agent as root for this file. Do not make the lease file world-readable
+(`chmod 644` or `666` is not the setup).
+
+```bash
+sudo chgrp dnsmasq-leases /var/lib/misc/dnsmasq.leases
+sudo chmod 640 /var/lib/misc/dnsmasq.leases
+```
+
+dnsmasq rewrites the lease file and may reset its group. After a rewrite,
+confirm the mode is still `640` and the group is still `dnsmasq-leases`.
+Keep that ownership in the dnsmasq setup (service `Group=`, tmpfiles, or an
+ACL owned by DHCP), not by loosening the station unit. Leave `User=mediateca`
+and `NoNewPrivileges=true` in place. The only station-unit change for this
+file is `SupplementaryGroups=dnsmasq-leases`.
+
+`command_results.error` is one of these codes. The text does not include the
+file path or lease rows:
+
+| code | meaning |
+| --- | --- |
+| `lease_file_missing` | the lease file is not there |
+| `lease_file_unreadable` | the file exists but could not be opened or read fully |
+| `invalid_lease_file` | a row is malformed, a MAC or IPv4 is invalid, or two active rows disagree on a MAC or an IP |
+
+`invalid_command` means `fetch_screens` arrived with a non-null `screen_id`.
+No screen operation runs.
 
 ## Docker
 
