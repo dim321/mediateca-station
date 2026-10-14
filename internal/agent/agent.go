@@ -25,6 +25,7 @@ import (
 	"mediateca-station/internal/health"
 	"mediateca-station/internal/httpmedia"
 	"mediateca-station/internal/hub"
+	"mediateca-station/internal/leases"
 	"mediateca-station/internal/player"
 	"mediateca-station/internal/report"
 	"mediateca-station/internal/schedule"
@@ -80,6 +81,7 @@ type Agent struct {
 	telemetryInterval time.Duration
 	healthWatcher     *health.Watcher
 	cmdExec           commandRunner
+	leaseFile         leases.File
 	startedAt         time.Time
 
 	stateMu      sync.RWMutex
@@ -168,6 +170,10 @@ func newAgent(cfg config.File, h Hub, p Player, log *slog.Logger) (*Agent, error
 		a.air = ctrl
 	}
 	a.loadDisk()
+	a.leaseFile = leases.File{
+		Path: leases.DefaultPath,
+		Now:  func() time.Time { return a.now() },
+	}
 	return a, nil
 }
 
@@ -315,10 +321,10 @@ func (a *Agent) pollCommands(ctx context.Context) {
 	go a.runCommands(context.WithoutCancel(ctx), commands)
 }
 
-func (a *Agent) runCommands(ctx context.Context, commands []hub.Command) {
+func (a *Agent) runCommands(ctx context.Context, cmds []hub.Command) {
 	exec := a.commandExecutor()
-	results := make([]hub.CommandResult, 0, len(commands))
-	for _, cmd := range commands {
+	results := make([]hub.CommandResult, 0, len(cmds))
+	for _, cmd := range cmds {
 		if a.commandAlreadyDone(cmd.ID) {
 			msg := "already_done"
 			results = append(results, hub.CommandResult{
@@ -329,14 +335,22 @@ func (a *Agent) runCommands(ctx context.Context, commands []hub.Command) {
 			})
 			continue
 		}
-		res := exec.Run(ctx, cmd)
-		results = append(results, res)
+		if cmd.Type == "fetch_screens" {
+			results = append(results, commands.FetchScreens(cmd, a.leaseFile.Active, a.now()))
+			continue
+		}
+		results = append(results, exec.Run(ctx, cmd))
 	}
 	if err := a.hub.PostCommandResults(ctx, results); errors.Is(err, hub.ErrUnauthorized) {
 		a.pauseToken()
 		return
 	} else if err != nil {
-		a.log.Error("hub command_results", "err", err.Error())
+		var status *hub.HTTPStatusError
+		if errors.As(err, &status) && status.Status == http.StatusUnprocessableEntity {
+			a.log.Error("hub command_results rejected", "status", status.Status, "command_ids", commandIDs(results))
+			return
+		}
+		a.log.Error("hub command_results", "err", err.Error(), "command_ids", commandIDs(results))
 		return
 	}
 	for _, res := range results {
@@ -344,6 +358,14 @@ func (a *Agent) runCommands(ctx context.Context, commands []hub.Command) {
 			a.markCommandDone(res.CommandID)
 		}
 	}
+}
+
+func commandIDs(results []hub.CommandResult) []string {
+	ids := make([]string, len(results))
+	for i, res := range results {
+		ids[i] = res.CommandID
+	}
+	return ids
 }
 
 func (a *Agent) commandAlreadyDone(id string) bool {
