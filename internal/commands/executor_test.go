@@ -273,7 +273,6 @@ func TestExecutorUnknownType(t *testing.T) {
 
 type slowDev struct {
 	delay time.Duration
-	mu    sync.Mutex
 
 	active int32
 	max    int32

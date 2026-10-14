@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -195,6 +196,175 @@ func TestPostCommandResults(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestFetchCommandsNumericAndNullScreenID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer tok" {
+			t.Errorf("auth %q", r.Header.Get("Authorization"))
+		}
+		io.WriteString(w, `{"commands":[`+
+			`{"id":"cmd_screen","screen_id":7,"type":"wake","params":{},"issued_at":"2026-10-13T14:00:00Z"},`+
+			`{"id":"cmd_station","screen_id":null,"type":"fetch_screens","params":{},"issued_at":"2026-10-13T14:00:00Z"}`+
+			`]}`)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "tok")
+	c.HTTP = srv.Client()
+	list, err := c.FetchCommands(context.Background(), "")
+	if err != nil || len(list.Commands) != 2 {
+		t.Fatalf("%v %+v", err, list)
+	}
+	screen := list.Commands[0]
+	if screen.ScreenAbsent || screen.ScreenID != 7 || screen.Type != "wake" {
+		t.Fatalf("%+v", screen)
+	}
+	station := list.Commands[1]
+	if !station.ScreenAbsent || station.ScreenID != 0 || station.Type != "fetch_screens" {
+		t.Fatalf("%+v", station)
+	}
+}
+
+func TestPostCommandResultsScreensJSON(t *testing.T) {
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/agent/v1/command_results" {
+			t.Fatalf("path %s", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer tok" {
+			t.Errorf("auth %q", r.Header.Get("Authorization"))
+		}
+		body, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "tok")
+	c.HTTP = srv.Client()
+	err := c.PostCommandResults(context.Background(), []CommandResult{{
+		CommandID:  "cmd_7b03539f-6ea8-4cf0-a719-1831b833f639",
+		OK:         true,
+		FinishedAt: time.Date(2026, 10, 13, 14, 0, 3, 0, time.UTC),
+		Result: &ScreensResult{Screens: []ScreenEndpoint{{
+			MACAddress: "aa:bb:cc:dd:ee:ff",
+			IPAddress:  "192.168.1.10",
+		}}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := compactJSON(t, body)
+	want := `{"results":[{"command_id":"cmd_7b03539f-6ea8-4cf0-a719-1831b833f639","ok":true,"error":null,"finished_at":"2026-10-13T14:00:03Z","result":{"screens":[{"mac_address":"aa:bb:cc:dd:ee:ff","ip_address":"192.168.1.10"}]}}]}`
+	if got != want {
+		t.Fatalf("got %s", got)
+	}
+}
+
+func TestPostCommandResultsEmptyScreens(t *testing.T) {
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "tok")
+	c.HTTP = srv.Client()
+	err := c.PostCommandResults(context.Background(), []CommandResult{{
+		CommandID:  "cmd_empty",
+		OK:         true,
+		FinishedAt: time.Date(2026, 10, 13, 14, 0, 3, 0, time.UTC),
+		Result:     &ScreensResult{Screens: []ScreenEndpoint{}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(compactJSON(t, body), `"screens":[]`) || strings.Contains(string(body), `"screens":null`) {
+		t.Fatalf("%s", body)
+	}
+}
+
+func TestPostCommandResultsErrorOmitsResult(t *testing.T) {
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "tok")
+	c.HTTP = srv.Client()
+	msg := "invalid_lease_file"
+	err := c.PostCommandResults(context.Background(), []CommandResult{{
+		CommandID:  "cmd_7b03539f-6ea8-4cf0-a719-1831b833f639",
+		OK:         false,
+		Error:      &msg,
+		FinishedAt: time.Date(2026, 10, 13, 14, 0, 3, 0, time.UTC),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := compactJSON(t, body)
+	want := `{"results":[{"command_id":"cmd_7b03539f-6ea8-4cf0-a719-1831b833f639","ok":false,"error":"invalid_lease_file","finished_at":"2026-10-13T14:00:03Z"}]}`
+	if got != want || strings.Contains(got, "screens") || strings.Contains(got, `"result":`) {
+		t.Fatalf("%s", got)
+	}
+}
+
+func TestPostCommandResultsStatus422DoesNotIncludeBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		io.WriteString(w, `{"error":"aa:bb:cc:dd:ee:ff","token":"tok"}`)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "tok")
+	c.HTTP = srv.Client()
+	err := c.PostCommandResults(context.Background(), []CommandResult{{
+		CommandID: "cmd_1", OK: true, FinishedAt: time.Date(2026, 10, 13, 14, 0, 3, 0, time.UTC),
+	}})
+	var status *HTTPStatusError
+	if !errors.As(err, &status) || status.Status != http.StatusUnprocessableEntity || status.Op != "command_results" {
+		t.Fatalf("%v", err)
+	}
+	if strings.Contains(err.Error(), "aa:bb") || strings.Contains(err.Error(), "tok") {
+		t.Fatalf("leaked %q", err.Error())
+	}
+}
+
+func TestPostCommandResultsStatus5xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "tok")
+	c.HTTP = srv.Client()
+	err := c.PostCommandResults(context.Background(), []CommandResult{{
+		CommandID: "cmd_1", OK: true, FinishedAt: time.Date(2026, 10, 13, 14, 0, 3, 0, time.UTC),
+	}})
+	var status *HTTPStatusError
+	if !errors.As(err, &status) || status.Status != http.StatusBadGateway {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestPostCommandResultsNetworkError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	c := New(srv.URL, "tok")
+	c.HTTP = srv.Client()
+	srv.Close()
+	err := c.PostCommandResults(context.Background(), []CommandResult{{
+		CommandID: "cmd_1", OK: true, FinishedAt: time.Date(2026, 10, 13, 14, 0, 3, 0, time.UTC),
+	}})
+	var status *HTTPStatusError
+	if err == nil || errors.As(err, &status) || errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("%v", err)
+	}
+}
+
+func compactJSON(t *testing.T, raw []byte) string {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String()
 }
 
 func TestUploadArtifact(t *testing.T) {

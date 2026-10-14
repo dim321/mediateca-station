@@ -3,11 +3,13 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -33,6 +35,7 @@ type fakeHub struct {
 	commands       []hub.Command
 	fetchCmdErr    error
 	postResultsErr error
+	holdResults    func()
 	teleErr        error
 	telePosts      int
 	lastTelemetry  hub.Telemetry
@@ -69,6 +72,9 @@ func (f *fakeHub) FetchCommands(context.Context, string) (hub.CommandsResponse, 
 }
 
 func (f *fakeHub) PostCommandResults(_ context.Context, results []hub.CommandResult) error {
+	if f.holdResults != nil {
+		f.holdResults()
+	}
 	f.mu.Lock()
 	f.commandResults = append(f.commandResults, results...)
 	err := f.postResultsErr
@@ -489,6 +495,167 @@ func TestPollRunsCommandsAndPostsResults(t *testing.T) {
 	}
 	if len(posted) != 1 || !posted[0].OK {
 		t.Fatalf("results %+v", posted)
+	}
+}
+
+func stationFetch(id string) hub.Command {
+	return hub.Command{ID: id, Type: "fetch_screens", ScreenAbsent: true}
+}
+
+func leaseLine() []byte {
+	return []byte("0 aa:bb:cc:dd:ee:ff 192.168.1.10 living-room-tv *\n")
+}
+
+func TestFetchScreensDoesNotRunScreenExecutor(t *testing.T) {
+	dir := t.TempDir()
+	h := &fakeHub{}
+	exec := &fakeCmdExec{}
+	a, _ := newTestAgent(t, testCfg(dir), h, &fakePlayer{})
+	a.cmdExec = exec
+	a.now = func() time.Time { return time.Date(2026, 10, 13, 14, 0, 3, 0, time.UTC) }
+	reads := 0
+	a.leaseFile.Read = func(string) ([]byte, error) {
+		reads++
+		return leaseLine(), nil
+	}
+	raw := []byte(`{"commands":[{"id":"cmd_fetch","screen_id":null,"type":"fetch_screens","params":{},"issued_at":"2026-10-13T14:00:00Z"},{"id":"cmd_unknown","screen_id":7,"type":"nope","issued_at":"2026-10-13T14:00:00Z"}]}`)
+	var resp hub.CommandsResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatal(err)
+	}
+	a.runCommands(context.Background(), resp.Commands)
+	exec.mu.Lock()
+	runs := append([]hub.Command(nil), exec.runs...)
+	exec.mu.Unlock()
+	if len(runs) != 1 || runs[0].ID != "cmd_unknown" || runs[0].Type != "nope" {
+		t.Fatalf("runs %+v", runs)
+	}
+	if reads != 1 {
+		t.Fatalf("reads %d", reads)
+	}
+	h.mu.Lock()
+	posted := append([]hub.CommandResult(nil), h.commandResults...)
+	h.mu.Unlock()
+	if len(posted) != 2 || !posted[0].OK || posted[0].Result == nil || len(posted[0].Result.Screens) != 1 {
+		t.Fatalf("%+v", posted)
+	}
+	if posted[0].Result.Screens[0].MACAddress != "aa:bb:cc:dd:ee:ff" || posted[0].Result.Screens[0].IPAddress != "192.168.1.10" {
+		t.Fatalf("%+v", posted[0].Result.Screens)
+	}
+	if !a.commandAlreadyDone("cmd_fetch") {
+		t.Fatal("successful fetch was not marked delivered")
+	}
+}
+
+func TestRunCommandsFetchScreensDelivery(t *testing.T) {
+	dir := t.TempDir()
+	h := &fakeHub{postResultsErr: errors.New("dial tcp")}
+	exec := &fakeCmdExec{}
+	a, buf := newTestAgent(t, testCfg(dir), h, &fakePlayer{})
+	a.cmdExec = exec
+	reads := 0
+	a.leaseFile.Read = func(string) ([]byte, error) {
+		reads++
+		return leaseLine(), nil
+	}
+	a.runCommands(context.Background(), []hub.Command{stationFetch("cmd_1")})
+	if a.commandAlreadyDone("cmd_1") || reads != 1 {
+		t.Fatalf("done=%v reads=%d", a.commandAlreadyDone("cmd_1"), reads)
+	}
+
+	h.mu.Lock()
+	h.postResultsErr = &hub.HTTPStatusError{Status: 503, Op: "command_results"}
+	h.mu.Unlock()
+	a.runCommands(context.Background(), []hub.Command{stationFetch("cmd_1")})
+	if a.commandAlreadyDone("cmd_1") || reads != 2 {
+		t.Fatalf("done=%v reads=%d", a.commandAlreadyDone("cmd_1"), reads)
+	}
+
+	buf.Reset()
+	h.mu.Lock()
+	h.postResultsErr = &hub.HTTPStatusError{Status: 422, Op: "command_results"}
+	h.mu.Unlock()
+	a.runCommands(context.Background(), []hub.Command{stationFetch("cmd_1")})
+	if a.commandAlreadyDone("cmd_1") || reads != 3 {
+		t.Fatalf("done=%v reads=%d", a.commandAlreadyDone("cmd_1"), reads)
+	}
+	logText := buf.String()
+	if !strings.Contains(logText, "422") || !strings.Contains(logText, "cmd_1") {
+		t.Fatalf("log %s", logText)
+	}
+	if strings.Contains(logText, "super-secret-token") || strings.Contains(logText, "/var/lib/misc/dnsmasq.leases") || strings.Contains(logText, "aa:bb:cc:dd:ee:ff") {
+		t.Fatalf("log leaked %s", logText)
+	}
+
+	h.mu.Lock()
+	h.postResultsErr = nil
+	h.mu.Unlock()
+	a.runCommands(context.Background(), []hub.Command{stationFetch("cmd_1")})
+	if !a.commandAlreadyDone("cmd_1") || reads != 4 {
+		t.Fatalf("done=%v reads=%d", a.commandAlreadyDone("cmd_1"), reads)
+	}
+	a.runCommands(context.Background(), []hub.Command{stationFetch("cmd_1")})
+	if reads != 4 {
+		t.Fatalf("delivered command re-read the lease file, reads=%d", reads)
+	}
+	exec.mu.Lock()
+	if len(exec.runs) != 0 {
+		t.Fatalf("executor %+v", exec.runs)
+	}
+	exec.mu.Unlock()
+}
+
+func TestFetchScreensResult401Pauses(t *testing.T) {
+	dir := t.TempDir()
+	h := &fakeHub{postResultsErr: hub.ErrUnauthorized}
+	a, _ := newTestAgent(t, testCfg(dir), h, &fakePlayer{})
+	a.leaseFile.Read = func(string) ([]byte, error) { return leaseLine(), nil }
+	a.runCommands(context.Background(), []hub.Command{stationFetch("cmd_1")})
+	if !a.reportPaused || a.commandAlreadyDone("cmd_1") {
+		t.Fatalf("paused=%v done=%v", a.reportPaused, a.commandAlreadyDone("cmd_1"))
+	}
+}
+
+func TestFetchScreensRetryDoesNotBlockPlayEvents(t *testing.T) {
+	dir := t.TempDir()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	h := &fakeHub{
+		cfg:            hub.Config{StationID: 1},
+		notMod:         true,
+		post:           201,
+		postResultsErr: errors.New("dial tcp"),
+		commands:       []hub.Command{stationFetch("cmd_1")},
+		holdResults: func() {
+			close(entered)
+			<-release
+		},
+	}
+	a, _ := newTestAgent(t, testCfg(dir), h, &fakePlayer{})
+	a.cmdExec = &fakeCmdExec{}
+	a.leaseFile.Read = func(string) ([]byte, error) { return leaseLine(), nil }
+	ev := report.Event{ScreenID: 7, MediaAssetID: 19, StartedAt: time.Date(2026, 10, 13, 14, 0, 3, 0, time.UTC)}
+	if err := a.queue.Enqueue(ev, "7:19:2026-10-13T14:00:03Z"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		a.poll(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("poll blocked on command_results")
+	}
+	if len(h.posts) != 1 || h.posts[0] != 201 {
+		t.Fatalf("play posts %+v", h.posts)
+	}
+	close(release)
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("command result was not attempted")
 	}
 }
 

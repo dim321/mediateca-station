@@ -58,22 +58,72 @@ type ScreenTelemetry struct {
 }
 
 type Command struct {
-	ID       string         `json:"id"`
-	ScreenID int            `json:"screen_id"`
-	Type     string         `json:"type"`
-	Params   map[string]any `json:"params"`
-	IssuedAt string         `json:"issued_at"`
+	ID           string         `json:"id"`
+	ScreenID     int            `json:"screen_id"`
+	ScreenAbsent bool           `json:"-"`
+	Type         string         `json:"type"`
+	Params       map[string]any `json:"params"`
+	IssuedAt     string         `json:"issued_at"`
+}
+
+func (c *Command) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ID       string          `json:"id"`
+		ScreenID json.RawMessage `json:"screen_id"`
+		Type     string          `json:"type"`
+		Params   map[string]any  `json:"params"`
+		IssuedAt string          `json:"issued_at"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	c.ID = raw.ID
+	c.Type = raw.Type
+	c.Params = raw.Params
+	c.IssuedAt = raw.IssuedAt
+	if len(raw.ScreenID) == 0 || string(raw.ScreenID) == "null" {
+		c.ScreenAbsent = true
+		c.ScreenID = 0
+		return nil
+	}
+	if err := json.Unmarshal(raw.ScreenID, &c.ScreenID); err != nil {
+		return fmt.Errorf("screen_id: %w", err)
+	}
+	c.ScreenAbsent = false
+	return nil
 }
 
 type CommandsResponse struct {
 	Commands []Command `json:"commands"`
 }
 
+type ScreenEndpoint struct {
+	MACAddress string `json:"mac_address"`
+	IPAddress  string `json:"ip_address"`
+}
+
+type ScreensResult struct {
+	Screens []ScreenEndpoint `json:"screens"`
+}
+
 type CommandResult struct {
-	CommandID  string    `json:"command_id"`
-	OK         bool      `json:"ok"`
-	Error      *string   `json:"error"`
-	FinishedAt time.Time `json:"finished_at"`
+	CommandID  string         `json:"command_id"`
+	OK         bool           `json:"ok"`
+	Error      *string        `json:"error"`
+	FinishedAt time.Time      `json:"finished_at"`
+	Result     *ScreensResult `json:"result,omitempty"`
+}
+
+type HTTPStatusError struct {
+	Status int
+	Op     string
+}
+
+func (e *HTTPStatusError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("hub %s: status %d", e.Op, e.Status)
 }
 
 type Media struct {
@@ -242,7 +292,7 @@ func (c *Client) PostCommandResults(ctx context.Context, results []CommandResult
 		return ErrUnauthorized
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("hub command_results: status %d", resp.StatusCode)
+		return &HTTPStatusError{Status: resp.StatusCode, Op: "command_results"}
 	}
 	return nil
 }
