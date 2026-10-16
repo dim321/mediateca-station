@@ -186,14 +186,55 @@ func newAgent(cfg config.File, h Hub, p Player, log *slog.Logger) (*Agent, error
 	return a, nil
 }
 
+func (a *Agent) screens() []config.Screen {
+	if len(a.cfg.Screens) > 0 {
+		return a.cfg.Screens
+	}
+	if a.hubCfg == nil {
+		return nil
+	}
+	seen := map[int]struct{}{}
+	var out []config.Screen
+	for _, hs := range a.hubCfg.Screens {
+		if _, dup := seen[hs.ID]; dup {
+			continue
+		}
+		if !hubScreenWired(hs) {
+			continue
+		}
+		seen[hs.ID] = struct{}{}
+		out = append(out, config.Screen{
+			ScreenID:   hs.ID,
+			ADBSerial:  hs.ADBSerial,
+			MAC:        hs.MAC,
+			StreamPort: hs.StreamPort,
+		})
+	}
+	return out
+}
+
+func hubScreenWired(hs hub.Screen) bool {
+	if hs.StreamPort <= 0 {
+		return false
+	}
+	s := hs.ADBSerial
+	i := strings.IndexByte(s, ':')
+	return i > 0 && i < len(s)-1
+}
+
 func (a *Agent) ensureBroadcasts(ctx context.Context) {
 	if a.voxel == nil {
 		return
 	}
-	for _, screen := range a.cfg.Screens {
+	seen := map[int]struct{}{}
+	for _, screen := range a.screens() {
 		if screen.StreamPort <= 0 {
 			continue
 		}
+		if _, ok := seen[screen.StreamPort]; ok {
+			continue
+		}
+		seen[screen.StreamPort] = struct{}{}
 		if err := a.voxel.Ensure(ctx, screen.StreamPort); err != nil {
 			a.log.Error("broadcast ensure", "screen_id", screen.ScreenID, "port", screen.StreamPort, "err", err.Error())
 		}
@@ -466,8 +507,9 @@ func (a *Agent) buildTelemetry(ctx context.Context) hub.Telemetry {
 		PackageETag:   a.etag,
 		BroadcastOK:   a.broadcastOK(ctx),
 	}
-	screens := make([]hub.ScreenTelemetry, 0, len(a.cfg.Screens))
-	for _, screen := range a.cfg.Screens {
+	cfgScreens := a.screens()
+	screens := make([]hub.ScreenTelemetry, 0, len(cfgScreens))
+	for _, screen := range cfgScreens {
 		screens = append(screens, a.screenTelemetry(ctx, screen))
 	}
 	return hub.Telemetry{
@@ -481,10 +523,15 @@ func (a *Agent) broadcastOK(ctx context.Context) bool {
 	if a.voxel == nil {
 		return true
 	}
-	for _, screen := range a.cfg.Screens {
+	seen := map[int]struct{}{}
+	for _, screen := range a.screens() {
 		if screen.StreamPort <= 0 {
 			continue
 		}
+		if _, ok := seen[screen.StreamPort]; ok {
+			continue
+		}
+		seen[screen.StreamPort] = struct{}{}
 		if err := a.voxel.Ensure(ctx, screen.StreamPort); err != nil {
 			return false
 		}
@@ -498,8 +545,8 @@ func (a *Agent) screenTelemetry(ctx context.Context, screen config.Screen) hub.S
 		StreamPort: screen.StreamPort,
 	}
 	out.Reachable = screenReachable(ctx, screen.ADBSerial)
-	serial, ok := a.cfg.Serial(screen.ScreenID)
-	if !ok {
+	serial := screen.ADBSerial
+	if serial == "" {
 		return out
 	}
 	agent := tv.NewAgent(serial)
@@ -551,8 +598,9 @@ func (a *Agent) tick(ctx context.Context) {
 	now := a.now()
 	entries := a.entries()
 	a.logMapping()
+	screenList := a.screens()
 	for _, screenID := range a.playable() {
-		serial, ok := a.cfg.Serial(screenID)
+		serial, ok := serialForScreen(screenList, screenID)
 		if !ok {
 			continue
 		}
@@ -673,7 +721,27 @@ func (a *Agent) pauseToken() {
 	a.log.Info("poll", "result", "unauthorized")
 }
 
+func serialForScreen(screens []config.Screen, screenID int) (string, bool) {
+	for _, s := range screens {
+		if s.ScreenID == screenID {
+			if s.ADBSerial == "" {
+				return "", false
+			}
+			return s.ADBSerial, true
+		}
+	}
+	return "", false
+}
+
 func (a *Agent) playable() []int {
+	if len(a.cfg.Screens) == 0 {
+		screens := a.screens()
+		ids := make([]int, 0, len(screens))
+		for _, screen := range screens {
+			ids = append(ids, screen.ScreenID)
+		}
+		return ids
+	}
 	if a.hubCfg == nil {
 		ids := make([]int, 0, len(a.cfg.Screens))
 		for _, screen := range a.cfg.Screens {
@@ -696,6 +764,22 @@ func (a *Agent) playable() []int {
 
 func (a *Agent) logMapping() {
 	if a.hubCfg == nil {
+		return
+	}
+	if len(a.cfg.Screens) == 0 {
+		wired := map[int]struct{}{}
+		for _, s := range a.screens() {
+			wired[s.ScreenID] = struct{}{}
+		}
+		for _, screen := range a.hubCfg.Screens {
+			if _, ok := wired[screen.ID]; ok {
+				continue
+			}
+			id := screen.ID
+			a.logOnce(fmt.Sprintf("map:%d:waiting_for_wiring", id), func() {
+				a.log.Error("screen mapping", "screen_id", id, "reason", "waiting_for_wiring")
+			})
+		}
 		return
 	}
 	local := map[int]struct{}{}
