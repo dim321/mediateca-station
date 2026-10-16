@@ -2,6 +2,7 @@ package air
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -107,12 +108,39 @@ func (c *Controller) Start(ctx context.Context, req StartReq) error {
 	}
 
 	c.mu.Lock()
+	existing := c.channels[req.Port]
+	if existing != nil {
+		if existing.mediaID == req.MediaID {
+			cancel()
+			_ = w.Close()
+			if _, ok := existing.viewers[req.ScreenID]; ok {
+				c.mu.Unlock()
+				return nil
+			}
+			existing.viewers[req.ScreenID] = req.Serial
+			c.mu.Unlock()
+			tv := c.NewTV(req.Serial)
+			url := c.StreamURL(req.ScreenID)
+			return tv.StartStream(ctx, url, 300)
+		}
+		cancel()
+		_ = w.Close()
+		c.mu.Unlock()
+		return fmt.Errorf("stream port %d busy", req.Port)
+	}
 	c.channels[req.Port] = newCh
 	c.mu.Unlock()
 
 	tv := c.NewTV(req.Serial)
 	url := c.StreamURL(req.ScreenID)
 	if err := tv.StartStream(ctx, url, 300); err != nil {
+		cancel()
+		_ = w.Close()
+		c.mu.Lock()
+		if c.channels[req.Port] == newCh {
+			delete(c.channels, req.Port)
+		}
+		c.mu.Unlock()
 		return err
 	}
 

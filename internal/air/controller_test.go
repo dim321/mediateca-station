@@ -2,6 +2,7 @@ package air
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,12 +13,16 @@ import (
 )
 
 type memTV struct {
-	mu    sync.Mutex
-	urls  []string
-	stops int
+	mu       sync.Mutex
+	urls     []string
+	stops    int
+	startErr error
 }
 
 func (m *memTV) StartStream(ctx context.Context, url string, bufferMs int) error {
+	if m.startErr != nil {
+		return m.startErr
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.urls = append(m.urls, url)
@@ -185,4 +190,43 @@ func (c *countCloser) Close() error {
 		c.onClose()
 	}
 	return c.WriteCloser.Close()
+}
+
+func TestControllerStartStreamFailureTearsDownChannel(t *testing.T) {
+	dir := t.TempDir()
+	media := filepath.Join(dir, "19")
+	if err := os.WriteFile(media, []byte{0x47, 0x00}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var closeCalls atomic.Int32
+	r, pipeW, _ := os.Pipe()
+	go io.Copy(io.Discard, r)
+	tracked := &countCloser{WriteCloser: pipeW, onClose: func() { closeCalls.Add(1) }}
+	wantErr := errors.New("start stream failed")
+	tv := &memTV{startErr: wantErr}
+	c := &Controller{
+		OpenWriter: func(port int) (io.WriteCloser, error) { return tracked, nil },
+		NewTV:      func(serial string) TV { return tv },
+		MediaPath:  func(id int) string { return media },
+		StreamURL:  func(screenID int) string { return "http://192.168.33.1:8091/" },
+		Pace:       "max",
+		ChunkSize:  18800,
+	}
+	ctx := context.Background()
+	req := StartReq{
+		ScreenID: 7, Serial: "192.168.33.182:5555", Port: 8091,
+		MediaID: 19, Duration: time.Second,
+	}
+	if err := c.Start(ctx, req); !errors.Is(err, wantErr) {
+		t.Fatalf("Start err=%v want %v", err, wantErr)
+	}
+	c.mu.Lock()
+	left := c.channels[req.Port]
+	c.mu.Unlock()
+	if left != nil {
+		t.Fatal("channel left in map after StartStream failure")
+	}
+	if closeCalls.Load() != 1 {
+		t.Fatalf("writer Close calls=%d want 1", closeCalls.Load())
+	}
 }
