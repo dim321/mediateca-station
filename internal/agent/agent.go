@@ -945,14 +945,23 @@ func (a *Agent) applyTVMonitor(cfg hub.Config) {
 }
 
 func (a *Agent) runHealthWatcher(ctx context.Context) {
-	ids := make([]int, 0, len(a.cfg.Screens))
-	for _, screen := range a.cfg.Screens {
+	screens := a.screens()
+	ids := make([]int, 0, len(screens))
+	for _, screen := range screens {
 		ids = append(ids, screen.ScreenID)
 	}
 	w := health.NewWatcher()
 	w.OnAir = a.screenOnAir
 	w.StartedRecently = a.screenStartedRecently
 	w.Client = a.tvHealthClient
+	w.ScreenIDs = func() []int {
+		list := a.screens()
+		out := make([]int, 0, len(list))
+		for _, s := range list {
+			out = append(out, s.ScreenID)
+		}
+		return out
+	}
 	a.stateMu.Lock()
 	a.healthWatcher = w
 	a.stateMu.Unlock()
@@ -991,7 +1000,7 @@ func (a *Agent) screenStartedRecently(screenID int) bool {
 }
 
 func (a *Agent) tvHealthClient(screenID int) health.ScreenClient {
-	serial, ok := a.cfg.Serial(screenID)
+	serial, ok := serialForScreen(a.screens(), screenID)
 	if !ok {
 		return nil
 	}
