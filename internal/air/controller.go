@@ -24,6 +24,14 @@ type StartReq struct {
 	Duration time.Duration
 }
 
+type channel struct {
+	mediaID int
+	writer  io.WriteCloser
+	cancel  context.CancelFunc
+	done    chan struct{}
+	viewers map[int]string // screenID -> serial
+}
+
 type Controller struct {
 	OpenWriter func(port int) (io.WriteCloser, error)
 	NewTV      func(serial string) TV
@@ -34,10 +42,7 @@ type Controller struct {
 	Log        *slog.Logger
 
 	mu       sync.Mutex
-	feeds    map[int]context.CancelFunc // screenID
-	feedDone map[int]chan struct{}
-	writers  map[int]io.WriteCloser
-	ports    map[int]int // screenID → stream port
+	channels map[int]*channel // port -> shared stream channel
 }
 
 func (c *Controller) Start(ctx context.Context, req StartReq) error {
@@ -49,59 +54,67 @@ func (c *Controller) Start(ctx context.Context, req StartReq) error {
 	_ = f.Close()
 
 	c.mu.Lock()
-	if c.feeds == nil {
-		c.feeds = map[int]context.CancelFunc{}
-		c.feedDone = map[int]chan struct{}{}
-		c.writers = map[int]io.WriteCloser{}
-		c.ports = map[int]int{}
+	if c.channels == nil {
+		c.channels = map[int]*channel{}
 	}
-	var waitDone chan struct{}
-	hadActive := false
-	var w io.WriteCloser
-	prevPort := -1
-	if cancel, ok := c.feeds[req.ScreenID]; ok {
-		hadActive = true
-		waitDone = c.feedDone[req.ScreenID]
-		cancel()
-		delete(c.feeds, req.ScreenID)
-		w = c.writers[req.ScreenID]
-		prevPort = c.ports[req.ScreenID]
+	ch := c.channels[req.Port]
+	if ch != nil && ch.mediaID == req.MediaID {
+		if _, ok := ch.viewers[req.ScreenID]; ok {
+			c.mu.Unlock()
+			return nil
+		}
+		ch.viewers[req.ScreenID] = req.Serial
+		c.mu.Unlock()
+		tv := c.NewTV(req.Serial)
+		url := c.StreamURL(req.ScreenID)
+		return tv.StartStream(ctx, url, 300)
+	}
+
+	var old *channel
+	if ch != nil {
+		old = ch
+		delete(c.channels, req.Port)
 	}
 	c.mu.Unlock()
 
+	var waitDone chan struct{}
+	var oldWriter io.WriteCloser
+	if old != nil {
+		waitDone = old.done
+		old.cancel()
+		oldWriter = old.writer
+	}
 	if waitDone != nil {
 		<-waitDone
 	}
-
-	if w == nil || prevPort != req.Port {
-		if w != nil {
-			_ = w.Close()
-			w = nil
-		}
-		w, err = c.OpenWriter(req.Port)
-		if err != nil {
-			return err
-		}
-		c.mu.Lock()
-		c.writers[req.ScreenID] = w
-		c.ports[req.ScreenID] = req.Port
-		c.mu.Unlock()
+	if oldWriter != nil {
+		_ = oldWriter.Close()
 	}
 
-	if !hadActive {
-		tv := c.NewTV(req.Serial)
-		url := c.StreamURL(req.ScreenID)
-		if err := tv.StartStream(ctx, url, 300); err != nil {
-			return err
-		}
+	w, err := c.OpenWriter(req.Port)
+	if err != nil {
+		return err
 	}
 
 	feedCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	newCh := &channel{
+		mediaID: req.MediaID,
+		writer:  w,
+		cancel:  cancel,
+		done:    done,
+		viewers: map[int]string{req.ScreenID: req.Serial},
+	}
+
 	c.mu.Lock()
-	c.feeds[req.ScreenID] = cancel
-	c.feedDone[req.ScreenID] = done
+	c.channels[req.Port] = newCh
 	c.mu.Unlock()
+
+	tv := c.NewTV(req.Serial)
+	url := c.StreamURL(req.ScreenID)
+	if err := tv.StartStream(ctx, url, 300); err != nil {
+		return err
+	}
 
 	feed := &feeder.Feeder{ChunkSize: c.ChunkSize, Pace: feeder.PaceMode(c.Pace)}
 	go func() {
@@ -115,21 +128,33 @@ func (c *Controller) Start(ctx context.Context, req StartReq) error {
 
 func (c *Controller) Stop(ctx context.Context, serial string, screenID int) error {
 	c.mu.Lock()
-	var waitDone chan struct{}
-	if cancel, ok := c.feeds[screenID]; ok {
-		waitDone = c.feedDone[screenID]
-		cancel()
-		delete(c.feeds, screenID)
-		delete(c.feedDone, screenID)
+	var ch *channel
+	var port int
+	for p, cch := range c.channels {
+		if _, ok := cch.viewers[screenID]; ok {
+			ch = cch
+			port = p
+			break
+		}
 	}
+	if ch != nil {
+		delete(ch.viewers, screenID)
+	}
+	remaining := ch != nil && len(ch.viewers) > 0
+	var waitDone chan struct{}
 	var w io.WriteCloser
-	if ww, ok := c.writers[screenID]; ok {
-		w = ww
-		delete(c.writers, screenID)
-		delete(c.ports, screenID)
+	var cancel context.CancelFunc
+	if ch != nil && !remaining {
+		waitDone = ch.done
+		cancel = ch.cancel
+		w = ch.writer
+		delete(c.channels, port)
 	}
 	c.mu.Unlock()
 
+	if cancel != nil {
+		cancel()
+	}
 	if waitDone != nil {
 		<-waitDone
 	}
@@ -141,7 +166,13 @@ func (c *Controller) Stop(ctx context.Context, serial string, screenID int) erro
 
 func (c *Controller) GapNull(screenID int, count int) error {
 	c.mu.Lock()
-	w := c.writers[screenID]
+	var w io.WriteCloser
+	for _, ch := range c.channels {
+		if _, ok := ch.viewers[screenID]; ok {
+			w = ch.writer
+			break
+		}
+	}
 	c.mu.Unlock()
 	if w == nil {
 		return nil
