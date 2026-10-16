@@ -173,6 +173,26 @@ can reach `broadcast_bind` on each `stream_port`.
    failed` or repeated `skip` for that entry).
 3. In the Hub, confirm a play event for that screen and media asset.
 
+## Несколько mini-PC
+
+Fleet install from an IP and agent-token inventory (see `deploy/stations.tsv.example`).
+Copy it to `deploy/stations.tsv`, fill in one row per mini-PC, and set mode `0600`
+(`chmod 600 deploy/stations.tsv`). Columns are IP and token (tab-separated).
+
+With VPN up to the site LAN (for example `192.168.1.0/24`):
+
+```bash
+sh deploy/install-stations.sh deploy/stations.tsv
+```
+
+The script writes `/etc/hosts` with `192.168.100.250 broadcast.mediateca.store` and
+deploys Voxel YAML **without** local `screens`. Screen wiring (`adb_serial`, `mac`,
+`stream_port`) arrives from Hub config after the process starts; until then logs
+show no air playback.
+
+Set `SSH_USER` when the SSH login on the mini-PC is not your local `$USER`.
+Re-running the script refreshes the binary and restarts `mediateca-station`.
+
 ## Hub control plane (M2)
 
 On the Voxel path, station still polls config and package and drains
