@@ -171,11 +171,11 @@ func (f *File) validate(doc fileYAML) error {
 	if f.DataDir == "" {
 		return fmt.Errorf("data_dir is required")
 	}
-	if len(doc.Screens) == 0 {
-		return fmt.Errorf("at least one screen is required")
-	}
 
 	voxel := f.BroadcastBin != ""
+	if !voxel && len(doc.Screens) == 0 {
+		return fmt.Errorf("at least one screen is required")
+	}
 	if voxel {
 		if f.BroadcastBind == "" {
 			return fmt.Errorf("broadcast_bind is required")

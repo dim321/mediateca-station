@@ -93,6 +93,25 @@ func TestLoadRejectsInvalidFields(t *testing.T) {
 	}
 }
 
+func TestLoadVoxelAllowsEmptyScreens(t *testing.T) {
+	body := `
+hub_base_url: "https://hub.example"
+agent_token: "token"
+data_dir: "/var/lib/mediateca-station"
+broadcast_bind: "192.168.33.1"
+broadcast_bin: "/home/stream/bin/broadcast"
+fifo_dir: "/tmp"
+voxel_apk: "/home/stream/apk/voxel-debug.apk"
+`
+	cfg, err := Load(writeConfig(t, body, 0o600))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.VoxelPath() || len(cfg.Screens) != 0 {
+		t.Fatalf("%+v", cfg)
+	}
+}
+
 func TestLoadVoxelPath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
