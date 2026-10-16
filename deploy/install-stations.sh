@@ -130,13 +130,44 @@ EOF
 	fi
 
 	stage=config
-	if ! render_config "$token" | ssh $ssh_opts "${ssh_user}@${ip}" 'sudo tee /etc/mediateca-station/config.yaml >/dev/null && sudo chown mediateca:mediateca /etc/mediateca-station/config.yaml && sudo chmod 0600 /etc/mediateca-station/config.yaml' >/dev/null 2>&1; then
+	local_config=$(umask 077; mktemp "${TMPDIR:-/tmp}/mediateca-config.XXXXXX")
+	if ! render_config "$token" >"$local_config"; then
+		rm -f "$local_config"
+		echo "failed $ip $stage"
+		return 1
+	fi
+	if ! scp $ssh_opts "$local_config" "${ssh_user}@${ip}:/tmp/config.yaml.new" >/dev/null 2>&1; then
+		rm -f "$local_config"
+		echo "failed $ip $stage"
+		return 1
+	fi
+	rm -f "$local_config"
+	if ! ssh $ssh_opts "${ssh_user}@${ip}" 'sudo install -m 0600 -o mediateca -g mediateca /tmp/config.yaml.new /etc/mediateca-station/config.yaml && rm -f /tmp/config.yaml.new' >/dev/null 2>&1; then
 		echo "failed $ip $stage"
 		return 1
 	fi
 
 	stage=hosts
-	if ! ssh $ssh_opts "${ssh_user}@${ip}" 'sudo cat /etc/hosts' 2>/dev/null | render_hosts_file | ssh $ssh_opts "${ssh_user}@${ip}" 'tmp=$(mktemp) && cat >"$tmp" && sudo mv "$tmp" /etc/hosts' >/dev/null 2>&1; then
+	local_hosts=$(mktemp "${TMPDIR:-/tmp}/mediateca-hosts-in.XXXXXX")
+	local_rendered=$(mktemp "${TMPDIR:-/tmp}/mediateca-hosts-out.XXXXXX")
+	if ! ssh $ssh_opts "${ssh_user}@${ip}" 'sudo cat /etc/hosts' >"$local_hosts" 2>/dev/null; then
+		rm -f "$local_hosts" "$local_rendered"
+		echo "failed $ip $stage"
+		return 1
+	fi
+	if ! render_hosts_file <"$local_hosts" >"$local_rendered"; then
+		rm -f "$local_hosts" "$local_rendered"
+		echo "failed $ip $stage"
+		return 1
+	fi
+	rm -f "$local_hosts"
+	if ! scp $ssh_opts "$local_rendered" "${ssh_user}@${ip}:/tmp/hosts.new" >/dev/null 2>&1; then
+		rm -f "$local_rendered"
+		echo "failed $ip $stage"
+		return 1
+	fi
+	rm -f "$local_rendered"
+	if ! ssh $ssh_opts "${ssh_user}@${ip}" 'tmp=$(mktemp) && sudo cp /tmp/hosts.new "$tmp" && sudo mv "$tmp" /etc/hosts && rm -f /tmp/hosts.new' >/dev/null 2>&1; then
 		echo "failed $ip $stage"
 		return 1
 	fi
