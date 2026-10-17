@@ -38,6 +38,29 @@ func TestWatcherSkipsRecentlyStarted(t *testing.T) {
 	}
 }
 
+func TestWatcherTickUsesScreenIDsCallback(t *testing.T) {
+	client := &fakeClient{}
+	var ids []int
+	w := &Watcher{
+		AutoRestart:     true,
+		OnAir:           func(int) bool { return true },
+		StartedRecently: func(int) bool { return false },
+		Client:          func(int) ScreenClient { return client },
+		ScreenIDs: func() []int {
+			return ids
+		},
+	}
+	w.tick(context.Background(), []int{99})
+	if client.restarts.Load() != 0 {
+		t.Fatalf("restarts=%d want 0 with empty callback list", client.restarts.Load())
+	}
+	ids = []int{7}
+	w.tick(context.Background(), []int{99})
+	if client.restarts.Load() != 1 {
+		t.Fatalf("restarts=%d want 1 from ScreenIDs callback", client.restarts.Load())
+	}
+}
+
 func TestWatcherRestartsWhenNotRecent(t *testing.T) {
 	client := &fakeClient{}
 	w := &Watcher{

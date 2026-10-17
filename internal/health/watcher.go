@@ -51,6 +51,8 @@ type Watcher struct {
 	OnAir           func(screenID int) bool
 	StartedRecently func(screenID int) bool
 	Client          func(screenID int) ScreenClient
+	// ScreenIDs, when set, is called on each tick to resolve which screens to watch.
+	ScreenIDs func() []int
 
 	mu       sync.Mutex
 	reconfig chan struct{}
@@ -112,9 +114,13 @@ func (w *Watcher) runCycle(ctx context.Context, screenIDs []int) error {
 func (w *Watcher) tick(ctx context.Context, screenIDs []int) {
 	w.mu.Lock()
 	auto := w.AutoRestart
+	screenIDsFn := w.ScreenIDs
 	w.mu.Unlock()
 	if !auto {
 		return
+	}
+	if screenIDsFn != nil {
+		screenIDs = screenIDsFn()
 	}
 	for _, screenID := range screenIDs {
 		if w.OnAir != nil && !w.OnAir(screenID) {

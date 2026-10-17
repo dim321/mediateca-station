@@ -34,6 +34,26 @@ func TestFetchConfig(t *testing.T) {
 	}
 }
 
+func TestFetchConfigReadsScreenWiring(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"station_id":3,"offline_cache_hours":24,"screens":[
+			{"id":7,"name":"Entrance","orientation":"landscape","adb_serial":"192.168.33.182:5555","mac":"78:53:33:4b:2c:29","stream_port":8091},
+			{"id":8,"name":"Window","orientation":"portrait"}
+		]}`)
+	}))
+	defer srv.Close()
+	cfg, err := New(srv.URL, "tok").FetchConfig(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Screens[0].ADBSerial != "192.168.33.182:5555" || cfg.Screens[0].MAC != "78:53:33:4b:2c:29" || cfg.Screens[0].StreamPort != 8091 {
+		t.Fatalf("wired %+v", cfg.Screens[0])
+	}
+	if cfg.Screens[1].ADBSerial != "" || cfg.Screens[1].StreamPort != 0 {
+		t.Fatalf("unwired %+v", cfg.Screens[1])
+	}
+}
+
 func TestFetchPackageStoresHeaderETagAnd304(t *testing.T) {
 	var sawNoneMatch string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

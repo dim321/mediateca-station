@@ -739,4 +739,46 @@ func TestBuildTelemetryIncludesScreens(t *testing.T) {
 	}
 }
 
+func TestHubWiringScreensWhenYAMLEmpty(t *testing.T) {
+	cfg := voxelTestCfg(t.TempDir())
+	cfg.Screens = nil
+	a := &Agent{
+		cfg: cfg,
+		hubCfg: &hub.Config{Screens: []hub.Screen{
+			{ID: 7, ADBSerial: "192.168.33.182:5555", MAC: "78:53:33:4b:2c:29", StreamPort: 8091},
+			{ID: 8, ADBSerial: "192.168.33.183:5555", MAC: "78:53:33:4b:2c:30", StreamPort: 8091},
+			{ID: 9, Name: "Window"},
+			{ID: 7, ADBSerial: "192.168.33.182:5555", StreamPort: 8091},
+		}},
+	}
+	got := a.screens()
+	if len(got) != 2 || got[0].ScreenID != 7 || got[1].ScreenID != 8 {
+		t.Fatalf("screens %+v", got)
+	}
+	if got[0].ADBSerial != "192.168.33.182:5555" || got[0].MAC != "78:53:33:4b:2c:29" || got[0].StreamPort != 8091 || got[1].StreamPort != 8091 {
+		t.Fatalf("wiring %+v", got)
+	}
+	ids := a.playable()
+	if len(ids) != 2 || ids[0] != 7 || ids[1] != 8 {
+		t.Fatalf("playable %v", ids)
+	}
+}
+
+func TestLocalYAMLIgnoresHubWiring(t *testing.T) {
+	cfg := voxelTestCfg(t.TempDir())
+	a := &Agent{
+		cfg: cfg,
+		hubCfg: &hub.Config{Screens: []hub.Screen{
+			{ID: 8, ADBSerial: "192.168.33.183:5555", StreamPort: 8092},
+		}},
+	}
+	ids := a.playable()
+	if len(ids) != 0 {
+		t.Fatalf("yaml screen 7 is not in hub config, playable %v", ids)
+	}
+	if len(a.screens()) != 1 || a.screens()[0].ScreenID != 7 {
+		t.Fatalf("screens %+v", a.screens())
+	}
+}
+
 func ptrPkg(pkg hub.Package) *hub.Package { return &pkg }

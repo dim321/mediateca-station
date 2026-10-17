@@ -18,6 +18,9 @@ type Screen struct {
 	ID          int    `json:"id"`
 	Name        string `json:"name"`
 	Orientation string `json:"orientation"`
+	ADBSerial   string `json:"adb_serial"`
+	MAC         string `json:"mac"`
+	StreamPort  int    `json:"stream_port"`
 }
 
 type TVMonitor struct {
