@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -39,9 +42,12 @@ func (a *Agent) Status(ctx context.Context) (Status, error) {
 	return st, err
 }
 
-func (a *Agent) StartStream(ctx context.Context, url string, bufferMs int) error {
-	body := map[string]any{"url": url, "buffer_ms": bufferMs}
-	return a.json(ctx, http.MethodPost, "/api/start_stream", body, nil)
+func (a *Agent) StartStream(ctx context.Context, streamURL string, bufferMs int) error {
+	// Voxel APK reads only the request line / query; JSON body is ignored.
+	q := url.Values{}
+	q.Set("url", streamURL)
+	q.Set("buffer_ms", strconv.Itoa(bufferMs))
+	return a.json(ctx, http.MethodPost, "/api/start_stream?"+q.Encode(), nil, nil)
 }
 
 func (a *Agent) RestartStream(ctx context.Context) error {
@@ -79,11 +85,16 @@ func (a *Agent) json(ctx context.Context, method, path string, body any, out any
 		return err
 	}
 	defer resp.Body.Close()
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("tv agent %s: %s", path, resp.Status)
+		msg := strings.TrimSpace(string(bodyBytes))
+		if msg == "" {
+			return fmt.Errorf("tv agent %s: %s", path, resp.Status)
+		}
+		return fmt.Errorf("tv agent %s: %s: %s", path, resp.Status, msg)
 	}
 	if out != nil {
-		return json.NewDecoder(resp.Body).Decode(out)
+		return json.Unmarshal(bodyBytes, out)
 	}
 	return nil
 }

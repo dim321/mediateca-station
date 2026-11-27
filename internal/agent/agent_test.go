@@ -217,6 +217,49 @@ func TestTickVoxelPathUsesAir(t *testing.T) {
 	}
 }
 
+func TestTickHubWiringStartsAirWithoutYAMLScreens(t *testing.T) {
+	dir := t.TempDir()
+	start := time.Date(2026, 9, 2, 2, 0, 0, 0, time.UTC)
+	seedReady(t, dir, 19, "/clip.ts")
+	cfg := voxelTestCfg(dir)
+	cfg.Screens = nil
+	fa := &fakeAir{}
+	a, buf := newTestAgent(t, cfg, &fakeHub{}, &fakePlayer{})
+	a.air = fa
+	a.now = func() time.Time { return start }
+	a.pkg = ptrPkg(pkgAt(start, 19, []int{7}))
+	a.hubCfg = &hub.Config{Screens: []hub.Screen{
+		{ID: 7, ADBSerial: "192.168.33.182:5555", MAC: "78:53:33:4b:2c:29", StreamPort: 8091},
+	}}
+	a.tick(context.Background())
+	if len(fa.starts) != 1 {
+		t.Fatalf("air starts=%d log=%s", len(fa.starts), buf.String())
+	}
+	req := fa.starts[0]
+	if req.ScreenID != 7 || req.Port != 8091 || req.Serial != "192.168.33.182:5555" || req.MediaID != 19 {
+		t.Fatalf("start req %+v", req)
+	}
+	if !a.queue.Played("7:19:2026-09-02T02:00:00Z") {
+		t.Fatal("played key missing")
+	}
+}
+
+func TestStreamURLUsesHubWiringWithoutYAMLScreens(t *testing.T) {
+	cfg := voxelTestCfg(t.TempDir())
+	cfg.Screens = nil
+	a, _ := newTestAgent(t, cfg, &fakeHub{}, &fakePlayer{})
+	a.hubCfg = &hub.Config{Screens: []hub.Screen{
+		{ID: 7, ADBSerial: "192.168.33.182:5555", StreamPort: 8091},
+	}}
+	u, ok := a.streamURL(7)
+	if !ok || u != "http://192.168.1.10:8091/" {
+		t.Fatalf("stream url %q ok=%v", u, ok)
+	}
+	if got := a.air.(*air.Controller).StreamURL(7); got != u {
+		t.Fatalf("controller stream url %q want %q", got, u)
+	}
+}
+
 func TestTickStartsAndDoesNotRepeat(t *testing.T) {
 	dir := t.TempDir()
 	start := time.Date(2026, 9, 2, 2, 0, 0, 0, time.UTC)

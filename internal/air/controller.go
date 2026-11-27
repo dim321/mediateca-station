@@ -66,9 +66,7 @@ func (c *Controller) Start(ctx context.Context, req StartReq) error {
 		}
 		ch.viewers[req.ScreenID] = req.Serial
 		c.mu.Unlock()
-		tv := c.NewTV(req.Serial)
-		url := c.StreamURL(req.ScreenID)
-		return tv.StartStream(ctx, url, 300)
+		return c.startViewer(ctx, req)
 	}
 
 	var old *channel
@@ -119,9 +117,7 @@ func (c *Controller) Start(ctx context.Context, req StartReq) error {
 			}
 			existing.viewers[req.ScreenID] = req.Serial
 			c.mu.Unlock()
-			tv := c.NewTV(req.Serial)
-			url := c.StreamURL(req.ScreenID)
-			return tv.StartStream(ctx, url, 300)
+			return c.startViewer(ctx, req)
 		}
 		cancel()
 		_ = w.Close()
@@ -131,9 +127,9 @@ func (c *Controller) Start(ctx context.Context, req StartReq) error {
 	c.channels[req.Port] = newCh
 	c.mu.Unlock()
 
-	tv := c.NewTV(req.Serial)
-	url := c.StreamURL(req.ScreenID)
-	if err := tv.StartStream(ctx, url, 300); err != nil {
+	// Priming nulls so broadcast has TS before the TV agent probes the URL.
+	// Without bytes on the FIFO, broadcast accepts TCP but sends nothing → APK often returns 400.
+	if err := (&feeder.Feeder{}).WriteNullPackets(w, 100); err != nil {
 		cancel()
 		_ = w.Close()
 		c.mu.Lock()
@@ -151,7 +147,28 @@ func (c *Controller) Start(ctx context.Context, req StartReq) error {
 			c.Log.Error("feed", "screen_id", req.ScreenID, "media_id", req.MediaID, "err", err.Error())
 		}
 	}()
+	time.Sleep(100 * time.Millisecond)
+
+	if err := c.startViewer(ctx, req); err != nil {
+		cancel()
+		<-done
+		_ = w.Close()
+		c.mu.Lock()
+		if c.channels[req.Port] == newCh {
+			delete(c.channels, req.Port)
+		}
+		c.mu.Unlock()
+		return err
+	}
 	return nil
+}
+
+func (c *Controller) startViewer(ctx context.Context, req StartReq) error {
+	url := c.StreamURL(req.ScreenID)
+	if url == "" {
+		return fmt.Errorf("empty stream url for screen %d", req.ScreenID)
+	}
+	return c.NewTV(req.Serial).StartStream(ctx, url, 300)
 }
 
 func (c *Controller) Stop(ctx context.Context, serial string, screenID int) error {

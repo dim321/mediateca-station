@@ -204,14 +204,16 @@ func TestControllerMediaIDSwitchOnSharedPort(t *testing.T) {
 	}
 	var openCalls atomic.Int32
 	var closeCalls atomic.Int32
-	r, pipeW, _ := os.Pipe()
-	go io.Copy(io.Discard, r)
-	tracked := &countCloser{WriteCloser: pipeW, onClose: func() { closeCalls.Add(1) }}
 	tvs := map[string]*memTV{}
 	c := &Controller{
 		OpenWriter: func(port int) (io.WriteCloser, error) {
 			openCalls.Add(1)
-			return tracked, nil
+			r, pipeW, err := os.Pipe()
+			if err != nil {
+				return nil, err
+			}
+			go io.Copy(io.Discard, r)
+			return &countCloser{WriteCloser: pipeW, onClose: func() { closeCalls.Add(1) }}, nil
 		},
 		NewTV: func(serial string) TV {
 			if tv, ok := tvs[serial]; ok {

@@ -112,22 +112,18 @@ func TestOsProcessRunningDetectsExit(t *testing.T) {
 	}
 }
 
-func TestOpenFifoWithoutReaderTimesOut(t *testing.T) {
+func TestOpenFifoWithoutReaderUsesHold(t *testing.T) {
 	dir := t.TempDir()
 	m := &Manager{FifoDir: dir}
 	port := 8092
 	if err := ensureFifo(m.FifoPath(port)); err != nil {
 		t.Fatal(err)
 	}
-	start := time.Now()
-	_, err := m.OpenFifo(port)
-	elapsed := time.Since(start)
-	if err == nil {
-		t.Fatal("expected error without fifo reader")
+	f, err := m.OpenFifo(port)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if elapsed < 1500*time.Millisecond || elapsed > 3*time.Second {
-		t.Fatalf("elapsed=%v want ~2s", elapsed)
-	}
+	_ = f.Close()
 }
 
 func TestOpenFifoWithReaderSucceeds(t *testing.T) {

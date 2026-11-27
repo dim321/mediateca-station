@@ -387,7 +387,7 @@ Mutex на экран. Таймауты: 5с для HTTP агента; 15с дл
 | Действие | Механизм |
 | --- | --- |
 | Status | `GET http://<tv-ip>:8989/api/status` |
-| Start | `POST /api/start_stream` `{url, buffer_ms}` |
+| Start | `POST /api/start_stream?url=...&buffer_ms=...` (query; APK тело JSON не читает) |
 | Restart | `POST /api/restart_stream` |
 | Stop | `POST /api/stop` |
 | Wake | `adb shell input keyevent KEYCODE_WAKEUP`; fallback WOL |
