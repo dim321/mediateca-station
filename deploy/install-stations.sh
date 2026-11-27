@@ -8,6 +8,7 @@ SSH_USER=voxel
 SSH_PORT=5956
 TAB=$(printf '\t')
 DEFAULT_VOXEL_APK=/home/stream/apk/voxel-debug.apk
+REPO_VOXEL_APK_REL=deploy/voxel-debug.apk
 
 validate_token() {
 	token=$1
@@ -99,7 +100,7 @@ WantedBy=multi-user.target
 EOF
 }
 
-# Remote setup script: packages + dirs. APK absence is a warning only.
+# Remote setup script: packages + dirs. Does not adb-install to TVs (may be offline).
 remote_setup_script() {
 	cat <<'EOF'
 set -eu
@@ -185,18 +186,26 @@ usermod -a -G dnsmasq-leases mediateca 2>/dev/null || true
 install -d -m 0700 -o mediateca -g mediateca /var/lib/mediateca-station
 install -d -m 0700 -o mediateca -g mediateca /var/lib/mediateca-station/fifo
 install -d -m 0750 /etc/mediateca-station
-
-VOXEL_APK="/home/stream/apk/voxel-debug.apk"
-if [ ! -f "$VOXEL_APK" ]; then
-	echo "warn: Voxel APK not found at $VOXEL_APK — place the file later; ensure_app will need it" >&2
-fi
+install -d -m 0755 /home/stream
+install -d -m 0755 /home/stream/apk
 EOF
+}
+
+require_repo_apk() {
+	repo_root=$1
+	apk_src=$repo_root/$REPO_VOXEL_APK_REL
+	if [ ! -f "$apk_src" ]; then
+		echo "missing $apk_src — commit Voxel APK as $REPO_VOXEL_APK_REL before install" >&2
+		return 1
+	fi
+	printf '%s\n' "$apk_src"
 }
 
 install_one() {
 	ip=$1
 	token=$2
 	binpath=$3
+	apk_src=$4
 	ssh_opts="-o BatchMode=yes -o Port=${SSH_PORT}"
 
 	echo "==> $ip ($SSH_USER): setup"
@@ -213,6 +222,17 @@ install_one() {
 		return 1
 	fi
 	if ! ssh $ssh_opts "${SSH_USER}@${ip}" 'sudo install -m 0755 /tmp/mediateca-station.new /usr/local/bin/mediateca-station && rm -f /tmp/mediateca-station.new'; then
+		echo "failed $ip $stage" >&2
+		return 1
+	fi
+
+	echo "==> $ip ($SSH_USER): voxel apk"
+	stage=apk
+	if ! scp $ssh_opts "$apk_src" "${SSH_USER}@${ip}:/tmp/voxel-debug.apk.new"; then
+		echo "failed $ip $stage" >&2
+		return 1
+	fi
+	if ! ssh $ssh_opts "${SSH_USER}@${ip}" "sudo install -d -m 0755 /home/stream/apk && sudo install -m 0644 /tmp/voxel-debug.apk.new $DEFAULT_VOXEL_APK && rm -f /tmp/voxel-debug.apk.new"; then
 		echo "failed $ip $stage" >&2
 		return 1
 	fi
@@ -303,6 +323,7 @@ main() {
 
 	script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 	repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+	apk_src=$(require_repo_apk "$repo_root") || exit 1
 	tmpbin=$(mktemp "${TMPDIR:-/tmp}/mediateca-station.XXXXXX")
 	trap 'rm -f "$tmpbin"' EXIT
 
@@ -313,7 +334,7 @@ main() {
 
 	failed=0
 	while IFS=$TAB read -r ip token; do
-		if ! install_one "$ip" "$token" "$tmpbin"; then
+		if ! install_one "$ip" "$token" "$tmpbin" "$apk_src"; then
 			failed=1
 		fi
 	done <<EOF

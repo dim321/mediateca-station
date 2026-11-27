@@ -108,9 +108,13 @@ Default for new stations. No `/home/stream/bin/broadcast` on disk.
 1. Install `adb`, an NTP client (`chrony` or `systemd-timesyncd`), and the
    systemd unit as in [Mini-PC](#mini-pc). Fleet script
    `deploy/install-stations.sh` also ensures `dnsmasq` and a WOL utility when
-   missing.
-2. Place the Voxel player APK at the path in `voxel_apk` when you have it
-   (install warns if the file is absent; it does not fail the whole install).
+   missing, and copies `deploy/voxel-debug.apk` from the repo to
+   `/home/stream/apk/voxel-debug.apk` (hard-fail if the file is missing in the
+   repo). TVs may be offline at install time — the script does **not**
+   `adb install` onto TVs.
+2. When TVs join eth0 and Hub sends `fetch_screens`, station reports leases
+   and installs the Voxel APK on each discovered TV if `com.voxel.mediastream`
+   is not present yet.
 3. Write production YAML with `stream_backend: builtin` and **without**
    `broadcast_bin`.
 
@@ -286,9 +290,13 @@ the existing play reporter). Air from cache continues.
 ### Station command: `fetch_screens`
 
 Hub sends `fetch_screens` with `screen_id: null` and empty `params`. The
-operator starts screen discovery on the Hub. Station does not start ADB, VLC,
-or a screen stream for this command. It reads active DHCP leases and posts
-`command_results`.
+operator starts screen discovery on the Hub. Station does not start VLC or a
+screen stream for this command. It reads active DHCP leases, posts
+`command_results` with MAC/IP pairs, and for each discovered IP tries
+`adb connect <ip>:5555` then installs `voxel_apk` if
+`com.voxel.mediastream` is missing (`pm path`). ADB/install failures are
+logged and do not fail the discovery result. Static DHCP (`dnsmasq.static`)
+is left to site admins — station does not rewrite it.
 
 The process needs read access to `/var/lib/misc/dnsmasq.leases`. Do not run
 the agent as root for this file. Do not make the lease file world-readable

@@ -590,6 +590,50 @@ func TestFetchScreensDoesNotRunScreenExecutor(t *testing.T) {
 	}
 }
 
+func TestFetchScreensEnsuresVoxelAPK(t *testing.T) {
+	dir := t.TempDir()
+	h := &fakeHub{}
+	cfg := voxelTestCfg(dir)
+	a, _ := newTestAgent(t, cfg, h, &fakePlayer{})
+	a.cmdExec = &fakeCmdExec{}
+	a.leaseFile.Read = func(string) ([]byte, error) { return leaseLine(), nil }
+	var seenIP, seenAPK string
+	a.ensureDiscoveredTV = func(ctx context.Context, ip, apk string) error {
+		seenIP, seenAPK = ip, apk
+		return errors.New("adb unreachable")
+	}
+	a.runCommands(context.Background(), []hub.Command{stationFetch("cmd_apk")})
+	if seenIP != "192.168.1.10" || seenAPK != cfg.VoxelAPK {
+		t.Fatalf("ip=%q apk=%q", seenIP, seenAPK)
+	}
+	h.mu.Lock()
+	posted := append([]hub.CommandResult(nil), h.commandResults...)
+	h.mu.Unlock()
+	if len(posted) != 1 || !posted[0].OK || posted[0].Result == nil {
+		t.Fatalf("ensure failure must not fail fetch: %+v", posted)
+	}
+	if !a.commandAlreadyDone("cmd_apk") {
+		t.Fatal("fetch should still be marked done")
+	}
+}
+
+func TestFetchScreensSkipsEnsureWithoutVoxelAPK(t *testing.T) {
+	dir := t.TempDir()
+	h := &fakeHub{}
+	a, _ := newTestAgent(t, testCfg(dir), h, &fakePlayer{})
+	a.cmdExec = &fakeCmdExec{}
+	a.leaseFile.Read = func(string) ([]byte, error) { return leaseLine(), nil }
+	called := false
+	a.ensureDiscoveredTV = func(ctx context.Context, ip, apk string) error {
+		called = true
+		return nil
+	}
+	a.runCommands(context.Background(), []hub.Command{stationFetch("cmd_lab")})
+	if called {
+		t.Fatal("lab config without voxel_apk must not ensure APK")
+	}
+}
+
 func TestRunCommandsFetchScreensDelivery(t *testing.T) {
 	dir := t.TempDir()
 	h := &fakeHub{postResultsErr: errors.New("dial tcp")}

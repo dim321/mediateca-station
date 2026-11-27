@@ -69,9 +69,11 @@ FIFO (этап A): `{fifo_dir}/stream_{port}.ts`; запись из `air.Control
 ### 2.5. Voxel player APK на телевизоре
 
 - **Package / activity:** `com.voxel.mediastream` / `.MainActivity`.
-- **Путь APK на ПК:** `voxel_apk` (деплой: `/home/stream/apk/voxel-debug.apk`).
+- **Источник в репо:** `deploy/voxel-debug.apk` (обязателен для `install-stations.sh`).
+- **Путь APK на ПК:** `voxel_apk` (деплой копирует в `/home/stream/apk/voxel-debug.apk`).
 - **HTTP API** на `:8989`: status / start_stream / restart_stream / stop (`internal/tv/agent.go`).
-- Файл APK может отсутствовать при install: скрипт **warn**, не hard-fail. Когда появится — положить по пути в конфиге.
+- **Install мини-ПК:** копирует APK на диск; **не** делает `adb install` на ТВ (ТВ могут быть offline).
+- **`fetch_screens`:** после чтения leases — `adb connect` + `pm path`; если пакета нет — `adb install -r` с локального `voxel_apk`. Ошибки ADB не роняют discovery.
 
 ### 2.6. NTP-клиент (chrony или systemd-timesyncd)
 
@@ -176,7 +178,7 @@ FIFO (этап A): `{fifo_dir}/stream_{port}.ts`; запись из `air.Control
 
 **Всегда (оба пути):** Linux, `adb`, NTP, systemd unit, сеть до Hub и до ТВ, пользователь `mediateca`.
 
-**Production builtin:** `stream_backend: builtin`, writable `fifo_dir`, путь `voxel_apk` (файл можно положить позже), `broadcast_bind` достижим с ТВ. **`/home/stream/bin/broadcast` не нужен.**
+**Production builtin:** `stream_backend: builtin`, writable `fifo_dir`, `deploy/voxel-debug.apk` в репо → `/home/stream/apk/voxel-debug.apk` на мини-ПК, `broadcast_bind` достижим с ТВ. **`/home/stream/bin/broadcast` не нужен.**
 
 **Production legacy:** исполняемый `broadcast_bin` + те же FIFO/APK/bind.
 

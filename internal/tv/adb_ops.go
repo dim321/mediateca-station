@@ -11,7 +11,8 @@ import (
 
 const (
 	recordRemotePath = "/sdcard/.mediateca_screenrecord.mp4"
-	mainActivity     = "com.voxel.mediastream/.MainActivity"
+	VoxelPackage     = "com.voxel.mediastream"
+	mainActivity     = VoxelPackage + "/.MainActivity"
 )
 
 type Runner interface {
@@ -147,6 +148,39 @@ func (d *Device) InstallAPK(ctx context.Context, apk string) error {
 
 func (d *Device) LaunchMain(ctx context.Context) error {
 	return d.runner().Run(ctx, "adb", "-s", d.Serial, "shell", "am", "start", "-n", mainActivity)
+}
+
+// PackageInstalled reports whether pkg is present on the device (adb pm path).
+// A missing package is not an error: (false, nil). Connect failures are returned.
+func (d *Device) PackageInstalled(ctx context.Context, pkg string) (bool, error) {
+	if err := d.Connect(ctx); err != nil {
+		return false, err
+	}
+	out, err := d.runner().RunOut(ctx, "adb", "-s", d.Serial, "shell", "pm", "path", pkg)
+	if strings.Contains(string(out), "package:") {
+		return true, nil
+	}
+	if err != nil {
+		// pm path exits non-zero when the package is absent.
+		return false, nil
+	}
+	return false, nil
+}
+
+// EnsurePackageInstalled installs apk when pkg is not on the device.
+// It does not launch the activity (unlike EnsureApp).
+func (d *Device) EnsurePackageInstalled(ctx context.Context, pkg, apk string) error {
+	ok, err := d.PackageInstalled(ctx, pkg)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return nil
+	}
+	if apk == "" {
+		return fmt.Errorf("apk path is empty")
+	}
+	return d.InstallAPK(ctx, apk)
 }
 
 func (d *Device) EnsureApp(ctx context.Context, agent *Agent, apk string) error {
