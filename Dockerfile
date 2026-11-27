@@ -1,5 +1,5 @@
 # Local debug image. The mini-PC layout in the README is what runs on site.
-FROM golang:1.25-bookworm AS build
+FROM golang:1.26.11-bookworm AS build
 
 WORKDIR /src
 COPY go.mod go.sum ./
