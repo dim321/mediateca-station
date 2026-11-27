@@ -7,7 +7,7 @@ HUB_BASE_URL=https://broadcast.mediateca.store
 SSH_USER=voxel
 SSH_PORT=5956
 TAB=$(printf '\t')
-DEFAULT_VOXEL_APK=/home/stream/apk/voxel-debug.apk
+DEFAULT_VOXEL_APK=/home/voxel/apk/voxel-debug.apk
 REPO_VOXEL_APK_REL=deploy/voxel-debug.apk
 
 validate_token() {
@@ -186,8 +186,9 @@ usermod -a -G dnsmasq-leases mediateca 2>/dev/null || true
 install -d -m 0700 -o mediateca -g mediateca /var/lib/mediateca-station
 install -d -m 0700 -o mediateca -g mediateca /var/lib/mediateca-station/fifo
 install -d -m 0750 /etc/mediateca-station
-install -d -m 0755 /home/stream
-install -d -m 0755 /home/stream/apk
+# APK under voxel home; mediateca must traverse home and read the file (adb install).
+install -d -m 0755 -o voxel -g voxel /home/voxel/apk
+chmod o+x /home/voxel
 EOF
 }
 
@@ -232,7 +233,7 @@ install_one() {
 		echo "failed $ip $stage" >&2
 		return 1
 	fi
-	if ! ssh $ssh_opts "${SSH_USER}@${ip}" "sudo install -d -m 0755 /home/stream/apk && sudo install -m 0644 /tmp/voxel-debug.apk.new $DEFAULT_VOXEL_APK && rm -f /tmp/voxel-debug.apk.new"; then
+	if ! ssh $ssh_opts "${SSH_USER}@${ip}" "sudo install -d -m 0755 -o voxel -g voxel /home/voxel/apk && sudo chmod o+x /home/voxel && sudo install -m 0644 -o voxel -g voxel /tmp/voxel-debug.apk.new $DEFAULT_VOXEL_APK && rm -f /tmp/voxel-debug.apk.new"; then
 		echo "failed $ip $stage" >&2
 		return 1
 	fi

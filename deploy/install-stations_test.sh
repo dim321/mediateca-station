@@ -30,7 +30,17 @@ printf '%s\n' "$cfg" | grep -qx 'stream_backend: "builtin"' || fail "stream_back
 if printf '%s\n' "$cfg" | grep -q '^broadcast_bin:'; then
   fail "deploy config must not require broadcast_bin"
 fi
-printf '%s\n' "$cfg" | grep -qx 'voxel_apk: "/home/stream/apk/voxel-debug.apk"' || fail "voxel_apk path"
+printf '%s\n' "$cfg" | grep -qx 'voxel_apk: "/home/voxel/apk/voxel-debug.apk"' || fail "voxel_apk path"
+if printf '%s\n' "$cfg" | grep -q '/home/stream/apk'; then
+  fail "deploy config must not place APK under /home/stream"
+fi
+
+setup=$(remote_setup_script)
+printf '%s\n' "$setup" | grep -q '/home/voxel/apk' || fail "setup must create /home/voxel/apk"
+if printf '%s\n' "$setup" | grep -q '/home/stream'; then
+  fail "setup must not create /home/stream"
+fi
+printf '%s\n' "$setup" | grep -q 'chmod o+x /home/voxel' || fail "setup must make /home/voxel traversable for mediateca"
 
 fake_root=$(mktemp -d)
 mkdir -p "$fake_root/deploy"

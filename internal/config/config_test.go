@@ -101,7 +101,7 @@ data_dir: "/var/lib/mediateca-station"
 broadcast_bind: "192.168.33.1"
 broadcast_bin: "/home/stream/bin/broadcast"
 fifo_dir: "/tmp"
-voxel_apk: "/home/stream/apk/voxel-debug.apk"
+voxel_apk: "/home/voxel/apk/voxel-debug.apk"
 `
 	cfg, err := Load(writeConfig(t, body, 0o600))
 	if err != nil {
@@ -122,7 +122,7 @@ data_dir: "/var/lib/mediateca-station"
 broadcast_bind: "192.168.33.1"
 broadcast_bin: "/home/stream/bin/broadcast"
 fifo_dir: "/tmp"
-voxel_apk: "/home/stream/apk/voxel-debug.apk"
+voxel_apk: "/home/voxel/apk/voxel-debug.apk"
 screens:
   - screen_id: 7
     adb_serial: "192.168.33.182:5555"
@@ -183,7 +183,7 @@ data_dir: "/var/lib/mediateca-station"
 broadcast_bind: "192.168.33.1"
 stream_backend: "builtin"
 fifo_dir: "/tmp"
-voxel_apk: "/home/stream/apk/voxel-debug.apk"
+voxel_apk: "/home/voxel/apk/voxel-debug.apk"
 screens:
   - screen_id: 7
     adb_serial: "192.168.33.182:5555"
@@ -212,7 +212,7 @@ data_dir: "/var/lib/mediateca-station"
 broadcast_bind: "192.168.33.1"
 stream_backend: "builtin"
 fifo_dir: "/tmp"
-voxel_apk: "/home/stream/apk/voxel-debug.apk"
+voxel_apk: "/home/voxel/apk/voxel-debug.apk"
 `
 	cfg, err := Load(writeConfig(t, body, 0o600))
 	if err != nil {
@@ -231,7 +231,7 @@ data_dir: "/var/lib/mediateca-station"
 broadcast_bind: "192.168.33.1"
 stream_backend: "voxel_bin"
 fifo_dir: "/tmp"
-voxel_apk: "/home/stream/apk/voxel-debug.apk"
+voxel_apk: "/home/voxel/apk/voxel-debug.apk"
 `
 	_, err := Load(writeConfig(t, body, 0o600))
 	if err == nil || !strings.Contains(err.Error(), "broadcast_bin") {
@@ -247,7 +247,7 @@ data_dir: "/var/lib/mediateca-station"
 broadcast_bind: "192.168.33.1"
 stream_backend: "ffmpeg"
 fifo_dir: "/tmp"
-voxel_apk: "/home/stream/apk/voxel-debug.apk"
+voxel_apk: "/home/voxel/apk/voxel-debug.apk"
 `
 	_, err := Load(writeConfig(t, body, 0o600))
 	if err == nil || !strings.Contains(err.Error(), "stream_backend") {
@@ -263,7 +263,7 @@ data_dir: "/var/lib/mediateca-station"
 broadcast_bind: "192.168.33.1"
 broadcast_bin: "/home/stream/bin/broadcast"
 fifo_dir: "/tmp"
-voxel_apk: "/home/stream/apk/voxel-debug.apk"
+voxel_apk: "/home/voxel/apk/voxel-debug.apk"
 `
 	cfg, err := Load(writeConfig(t, body, 0o600))
 	if err != nil {

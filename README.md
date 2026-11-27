@@ -109,9 +109,10 @@ Default for new stations. No `/home/stream/bin/broadcast` on disk.
    systemd unit as in [Mini-PC](#mini-pc). Fleet script
    `deploy/install-stations.sh` also ensures `dnsmasq` and a WOL utility when
    missing, and copies `deploy/voxel-debug.apk` from the repo to
-   `/home/stream/apk/voxel-debug.apk` (hard-fail if the file is missing in the
-   repo). TVs may be offline at install time — the script does **not**
-   `adb install` onto TVs.
+   `/home/voxel/apk/voxel-debug.apk` (mode `0644`, owned by `voxel`;
+   `/home/voxel` gets `o+x` so `mediateca` can read it for `adb install`).
+   Hard-fail if the APK is missing in the repo. TVs may be offline at
+   install time — the script does **not** `adb install` onto TVs.
 2. When TVs join eth0 and Hub sends `fetch_screens`, station reports leases
    and installs the Voxel APK on each discovered TV if `com.voxel.mediastream`
    is not present yet.
@@ -128,7 +129,7 @@ data_dir: "/var/lib/mediateca-station"
 broadcast_bind: "192.168.33.1"
 stream_backend: "builtin"
 fifo_dir: "/var/lib/mediateca-station/fifo"
-voxel_apk: "/home/stream/apk/voxel-debug.apk"
+voxel_apk: "/home/voxel/apk/voxel-debug.apk"
 chunk_size: 18800
 feeder_pace: "realtime"
 
