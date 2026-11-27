@@ -4,6 +4,8 @@ set -eu
 HUB_HOSTNAME=broadcast.mediateca.store
 HUB_HOSTS_IP=192.168.100.250
 HUB_BASE_URL=https://broadcast.mediateca.store
+SSH_USER=voxel
+SSH_PORT=5956
 TAB=$(printf '\t')
 
 validate_token() {
@@ -59,7 +61,7 @@ poll_interval: "1m"
 data_dir: "/var/lib/mediateca-station"
 broadcast_bind: "192.168.33.1"
 broadcast_bin: "/home/stream/bin/broadcast"
-fifo_dir: "/tmp"
+fifo_dir: "/var/lib/mediateca-station/fifo"
 voxel_apk: "/home/stream/apk/voxel-debug.apk"
 chunk_size: 18800
 feeder_pace: "realtime"
@@ -100,11 +102,11 @@ install_one() {
 	ip=$1
 	token=$2
 	binpath=$3
-	ssh_user=${SSH_USER:-$USER}
-	ssh_opts="-o BatchMode=yes"
+	ssh_opts="-o BatchMode=yes -o Port=${SSH_PORT}"
 
+	echo "==> $ip ($SSH_USER): setup"
 	stage=setup
-	if ! ssh $ssh_opts "${ssh_user}@${ip}" sudo bash -s <<'EOF' >/dev/null 2>&1
+	if ! ssh $ssh_opts "${SSH_USER}@${ip}" sudo bash -s <<'EOF'
 set -eu
 getent group dnsmasq-leases >/dev/null || groupadd --system dnsmasq-leases
 if ! getent passwd mediateca >/dev/null; then
@@ -112,75 +114,81 @@ if ! getent passwd mediateca >/dev/null; then
 fi
 usermod -a -G dnsmasq-leases mediateca 2>/dev/null || true
 install -d -m 0700 -o mediateca -g mediateca /var/lib/mediateca-station
+install -d -m 0700 -o mediateca -g mediateca /var/lib/mediateca-station/fifo
 install -d -m 0750 /etc/mediateca-station
 EOF
 	then
-		echo "failed $ip $stage"
+		echo "failed $ip $stage" >&2
 		return 1
 	fi
 
+	echo "==> $ip ($SSH_USER): binary"
 	stage=binary
-	if ! scp $ssh_opts "$binpath" "${ssh_user}@${ip}:/tmp/mediateca-station.new" >/dev/null 2>&1; then
-		echo "failed $ip $stage"
+	if ! scp $ssh_opts "$binpath" "${SSH_USER}@${ip}:/tmp/mediateca-station.new"; then
+		echo "failed $ip $stage" >&2
 		return 1
 	fi
-	if ! ssh $ssh_opts "${ssh_user}@${ip}" 'sudo install -m 0755 /tmp/mediateca-station.new /usr/local/bin/mediateca-station && rm -f /tmp/mediateca-station.new' >/dev/null 2>&1; then
-		echo "failed $ip $stage"
+	if ! ssh $ssh_opts "${SSH_USER}@${ip}" 'sudo install -m 0755 /tmp/mediateca-station.new /usr/local/bin/mediateca-station && rm -f /tmp/mediateca-station.new'; then
+		echo "failed $ip $stage" >&2
 		return 1
 	fi
 
+	echo "==> $ip ($SSH_USER): config"
 	stage=config
 	local_config=$(umask 077; mktemp "${TMPDIR:-/tmp}/mediateca-config.XXXXXX")
 	if ! render_config "$token" >"$local_config"; then
 		rm -f "$local_config"
-		echo "failed $ip $stage"
+		echo "failed $ip $stage" >&2
 		return 1
 	fi
-	if ! scp $ssh_opts "$local_config" "${ssh_user}@${ip}:/tmp/config.yaml.new" >/dev/null 2>&1; then
+	if ! scp $ssh_opts "$local_config" "${SSH_USER}@${ip}:/tmp/config.yaml.new"; then
 		rm -f "$local_config"
-		echo "failed $ip $stage"
+		echo "failed $ip $stage" >&2
 		return 1
 	fi
 	rm -f "$local_config"
-	if ! ssh $ssh_opts "${ssh_user}@${ip}" 'sudo install -m 0600 -o mediateca -g mediateca /tmp/config.yaml.new /etc/mediateca-station/config.yaml && rm -f /tmp/config.yaml.new' >/dev/null 2>&1; then
-		echo "failed $ip $stage"
+	if ! ssh $ssh_opts "${SSH_USER}@${ip}" 'sudo install -m 0600 -o mediateca -g mediateca /tmp/config.yaml.new /etc/mediateca-station/config.yaml && rm -f /tmp/config.yaml.new'; then
+		echo "failed $ip $stage" >&2
 		return 1
 	fi
 
+	echo "==> $ip ($SSH_USER): hosts"
 	stage=hosts
 	local_hosts=$(mktemp "${TMPDIR:-/tmp}/mediateca-hosts-in.XXXXXX")
 	local_rendered=$(mktemp "${TMPDIR:-/tmp}/mediateca-hosts-out.XXXXXX")
-	if ! ssh $ssh_opts "${ssh_user}@${ip}" 'sudo cat /etc/hosts' >"$local_hosts" 2>/dev/null; then
+	if ! ssh $ssh_opts "${SSH_USER}@${ip}" 'sudo cat /etc/hosts' >"$local_hosts"; then
 		rm -f "$local_hosts" "$local_rendered"
-		echo "failed $ip $stage"
+		echo "failed $ip $stage" >&2
 		return 1
 	fi
 	if ! render_hosts_file <"$local_hosts" >"$local_rendered"; then
 		rm -f "$local_hosts" "$local_rendered"
-		echo "failed $ip $stage"
+		echo "failed $ip $stage" >&2
 		return 1
 	fi
 	rm -f "$local_hosts"
-	if ! scp $ssh_opts "$local_rendered" "${ssh_user}@${ip}:/tmp/hosts.new" >/dev/null 2>&1; then
+	if ! scp $ssh_opts "$local_rendered" "${SSH_USER}@${ip}:/tmp/hosts.new"; then
 		rm -f "$local_rendered"
-		echo "failed $ip $stage"
+		echo "failed $ip $stage" >&2
 		return 1
 	fi
 	rm -f "$local_rendered"
-	if ! ssh $ssh_opts "${ssh_user}@${ip}" 'tmp=$(mktemp) && sudo cp /tmp/hosts.new "$tmp" && sudo mv "$tmp" /etc/hosts && rm -f /tmp/hosts.new' >/dev/null 2>&1; then
-		echo "failed $ip $stage"
+	if ! ssh $ssh_opts "${SSH_USER}@${ip}" 'tmp=$(mktemp) && sudo cp /tmp/hosts.new "$tmp" && sudo mv "$tmp" /etc/hosts && rm -f /tmp/hosts.new'; then
+		echo "failed $ip $stage" >&2
 		return 1
 	fi
 
+	echo "==> $ip ($SSH_USER): unit"
 	stage=unit
-	if ! render_unit | ssh $ssh_opts "${ssh_user}@${ip}" 'sudo tee /etc/systemd/system/mediateca-station.service >/dev/null' >/dev/null 2>&1; then
-		echo "failed $ip $stage"
+	if ! render_unit | ssh $ssh_opts "${SSH_USER}@${ip}" 'sudo tee /etc/systemd/system/mediateca-station.service >/dev/null'; then
+		echo "failed $ip $stage" >&2
 		return 1
 	fi
 
+	echo "==> $ip ($SSH_USER): systemd"
 	stage=systemd
-	if ! ssh $ssh_opts "${ssh_user}@${ip}" 'sudo systemctl daemon-reload && sudo systemctl enable --now mediateca-station && sudo systemctl restart mediateca-station' >/dev/null 2>&1; then
-		echo "failed $ip $stage"
+	if ! ssh $ssh_opts "${SSH_USER}@${ip}" 'sudo systemctl daemon-reload && sudo systemctl enable --now mediateca-station && sudo systemctl restart mediateca-station'; then
+		echo "failed $ip $stage" >&2
 		return 1
 	fi
 

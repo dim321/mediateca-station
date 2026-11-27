@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const fifoOpenTimeout = 2 * time.Second
+const fifoOpenTimeout = 5 * time.Second
 
 type Process interface {
 	Pid() int
@@ -26,11 +26,34 @@ type Runner interface {
 	Start(ctx context.Context, argv ...string) (Process, error)
 }
 
-type ExecRunner struct{}
+type ExecRunner struct {
+	LogFile string
+}
 
-func (ExecRunner) Start(ctx context.Context, argv ...string) (Process, error) {
+func (r ExecRunner) Start(ctx context.Context, argv ...string) (Process, error) {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if r.LogFile != "" {
+		f, err := os.OpenFile(r.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			return nil, err
+		}
+		cmd.Stdout = f
+		cmd.Stderr = f
+		// File stays open for the lifetime of the process; closed on Wait via SetFinalizer-free path:
+		// process exit does not close our fd automatically when cmd releases — close after Wait.
+		p := &osProcess{cmd: cmd, done: make(chan struct{}), log: f}
+		if err := cmd.Start(); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+		go func() {
+			_ = cmd.Wait()
+			_ = f.Close()
+			close(p.done)
+		}()
+		return p, nil
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -45,6 +68,7 @@ func (ExecRunner) Start(ctx context.Context, argv ...string) (Process, error) {
 type osProcess struct {
 	cmd  *exec.Cmd
 	done chan struct{}
+	log  *os.File
 }
 
 func (p *osProcess) Pid() int    { return p.cmd.Process.Pid }
@@ -92,16 +116,25 @@ func (m *Manager) Ensure(ctx context.Context, port int) error {
 	if err := ensureFifo(fifo); err != nil {
 		return err
 	}
-	if m.Runner == nil {
-		m.Runner = ExecRunner{}
-	}
-	proc, err := m.Runner.Start(ctx, m.Bin, fifo, fmt.Sprintf(":%d", port))
-	if err != nil {
+	voxelDir := filepath.Join(m.DataDir, "voxel")
+	if err := os.MkdirAll(voxelDir, 0o700); err != nil {
 		return err
 	}
+	runner := m.Runner
+	if runner == nil {
+		runner = ExecRunner{LogFile: filepath.Join(voxelDir, fmt.Sprintf("broadcast_%d.log", port))}
+	}
+	proc, err := runner.Start(ctx, m.Bin, fifo, fmt.Sprintf(":%d", port))
+	if err != nil {
+		return fmt.Errorf("start %s: %w", m.Bin, err)
+	}
+	// Brief settle: catch immediate exec/permission/bind failures.
+	time.Sleep(50 * time.Millisecond)
+	if !proc.Running() {
+		return fmt.Errorf("broadcast exited immediately (bin=%s fifo=%s port=%d; see %s)", m.Bin, fifo, port, filepath.Join(voxelDir, fmt.Sprintf("broadcast_%d.log", port)))
+	}
 	m.procs[port] = proc
-	_ = os.MkdirAll(filepath.Join(m.DataDir, "voxel"), 0o700)
-	pidPath := filepath.Join(m.DataDir, "voxel", fmt.Sprintf("broadcast_%d.pid", port))
+	pidPath := filepath.Join(voxelDir, fmt.Sprintf("broadcast_%d.pid", port))
 	return os.WriteFile(pidPath, []byte(strconv.Itoa(proc.Pid())+"\n"), 0o600)
 }
 
@@ -118,28 +151,46 @@ func (m *Manager) Stop(port int) error {
 }
 
 func (m *Manager) OpenFifo(port int) (*os.File, error) {
-	return openFifoWriter(m.FifoPath(port), fifoOpenTimeout)
+	path := m.FifoPath(port)
+	f, err := openFifoWriter(path, fifoOpenTimeout)
+	if err == nil {
+		return f, nil
+	}
+	m.mu.Lock()
+	p := m.procs[port]
+	bin := m.Bin
+	m.mu.Unlock()
+	if p != nil && !p.Running() {
+		return nil, fmt.Errorf("open %s: broadcast on :%d exited (bin=%s): %w", path, port, bin, err)
+	}
+	if errors.Is(err, syscall.ENXIO) {
+		return nil, fmt.Errorf("open %s: timed out waiting for broadcast reader on :%d: %w", path, port, err)
+	}
+	return nil, err
 }
 
 func openFifoWriter(path string, timeout time.Duration) (*os.File, error) {
+	// Linux FIFO deadlock: O_WRONLY waits for a reader, O_RDONLY waits for a writer.
+	// Hold an O_RDWR fd so the write open can proceed; broadcast then opens O_RDONLY.
+	hold, err := os.OpenFile(path, os.O_RDWR|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer hold.Close()
+
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for {
-		f, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+		f, err := os.OpenFile(path, os.O_WRONLY, 0)
 		if err == nil {
-			// Clear O_NONBLOCK so paced writes are not EAGAIN under backpressure.
-			if err := syscall.SetNonblock(int(f.Fd()), false); err != nil {
-				_ = f.Close()
-				return nil, err
-			}
 			return f, nil
 		}
 		lastErr = err
-		if errors.Is(err, syscall.ENXIO) {
+		if errors.Is(err, syscall.ENXIO) || errors.Is(err, syscall.EINTR) {
 			if time.Now().After(deadline) {
 				return nil, lastErr
 			}
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(20 * time.Millisecond)
 			continue
 		}
 		return nil, err
@@ -149,9 +200,23 @@ func openFifoWriter(path string, timeout time.Duration) (*os.File, error) {
 func ensureFifo(path string) error {
 	if st, err := os.Stat(path); err == nil {
 		if st.Mode()&os.ModeNamedPipe != 0 {
-			return nil
-		}
-		if err := os.Remove(path); err != nil {
+			f, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+			if err == nil {
+				_ = f.Close()
+				return nil
+			}
+			// ENXIO: no reader yet, but this process may write once broadcast opens the read end.
+			if errors.Is(err, syscall.ENXIO) {
+				return nil
+			}
+			if os.IsPermission(err) || errors.Is(err, syscall.EACCES) {
+				if remErr := os.Remove(path); remErr != nil {
+					return fmt.Errorf("fifo %s not writable: %w (remove: %v)", path, err, remErr)
+				}
+			} else {
+				return err
+			}
+		} else if err := os.Remove(path); err != nil {
 			return err
 		}
 	}

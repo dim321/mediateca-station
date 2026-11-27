@@ -378,7 +378,7 @@ Per-screen mutex. Timeouts: 5s for agent HTTP; 15s for adb install / record.
 | Action | Mechanism |
 | --- | --- |
 | Status | `GET http://<tv-ip>:8989/api/status` |
-| Start | `POST /api/start_stream` `{url, buffer_ms}` |
+| Start | `POST /api/start_stream?url=...&buffer_ms=...` (query string; APK ignores JSON body) |
 | Restart | `POST /api/restart_stream` |
 | Stop | `POST /api/stop` |
 | Wake | `adb shell input keyevent KEYCODE_WAKEUP`; fallback WOL |

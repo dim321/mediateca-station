@@ -45,6 +45,8 @@ sudo install -d -m 0750 /etc/mediateca-station
 
 Write `/etc/mediateca-station/config.yaml` and `chmod 0600` it. The process
 refuses a config that is group or world readable.
+Station.assign_agent_token!()
+
 
 ```yaml
 hub_base_url: "https://hub.example"
@@ -105,6 +107,23 @@ Stop and disable anything that still starts or verifies air outside station:
 ```bash
 sudo systemctl stop tv-verifier.service
 sudo systemctl disable tv-verifier.service
+```
+
+```bash
+sudo kill 2361528
+# если не умер:
+sudo kill -9 2361528
+
+ss -lntp | grep 8091 || echo "8091 free"
+
+# кто поднимает снова после ребута/рестарта
+sudo systemctl list-units --type=service --all | grep -Ei 'broadcast|stream|voxel|playlist'
+sudo grep -r broadcast /etc/systemd/system /lib/systemd/system 2>/dev/null | head
+ps aux | grep -E 'start_broadcast|/usr/local/bin/broadcast' | grep -v grep
+
+sudo systemctl restart mediateca-station
+ps -o user,pid,ppid,cmd -C broadcast
+
 ```
 
 Do not run the host `controller` for air. If the old stack reads Hub

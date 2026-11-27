@@ -166,13 +166,16 @@ func newAgent(cfg config.File, h Hub, p Player, log *slog.Logger) (*Agent, error
 			},
 			MediaPath: a.cache.Path,
 			StreamURL: func(screenID int) string {
-				u, ok := cfg.StreamURL(screenID)
+				u, ok := a.streamURL(screenID)
 				if !ok {
 					return ""
 				}
 				return u
 			},
 			OpenWriter: func(port int) (io.WriteCloser, error) {
+				if err := vm.Ensure(context.Background(), port); err != nil {
+					return nil, err
+				}
 				return vm.OpenFifo(port)
 			},
 		}
@@ -220,6 +223,23 @@ func hubScreenWired(hs hub.Screen) bool {
 	s := hs.ADBSerial
 	i := strings.IndexByte(s, ':')
 	return i > 0 && i < len(s)-1
+}
+
+func (a *Agent) screenByID(id int) (config.Screen, bool) {
+	for _, s := range a.screens() {
+		if s.ScreenID == id {
+			return s, true
+		}
+	}
+	return config.Screen{}, false
+}
+
+func (a *Agent) streamURL(screenID int) (string, bool) {
+	s, ok := a.screenByID(screenID)
+	if !ok || s.StreamPort == 0 || a.cfg.BroadcastBind == "" {
+		return "", false
+	}
+	return fmt.Sprintf("http://%s:%d/", a.cfg.BroadcastBind, s.StreamPort), true
 }
 
 func (a *Agent) ensureBroadcasts(ctx context.Context) {
@@ -454,9 +474,9 @@ func (a *Agent) commandExecutor() commandRunner {
 		return a.cmdExec
 	}
 	return &commands.Executor{
-		Screen: a.cfg.ScreenByID,
+		Screen: a.screenByID,
 		StreamURL: func(id int) string {
-			u, ok := a.cfg.StreamURL(id)
+			u, ok := a.streamURL(id)
 			if !ok {
 				return ""
 			}
@@ -464,14 +484,14 @@ func (a *Agent) commandExecutor() commandRunner {
 		},
 		APKPath: func() string { return a.cfg.VoxelAPK },
 		TV: func(screenID int) commands.AgentClient {
-			serial, ok := a.cfg.Serial(screenID)
-			if !ok {
+			screen, ok := a.screenByID(screenID)
+			if !ok || screen.ADBSerial == "" {
 				return nil
 			}
-			return tv.NewAgent(serial)
+			return tv.NewAgent(screen.ADBSerial)
 		},
 		Device: func(screenID int) commands.DeviceClient {
-			screen, ok := a.cfg.ScreenByID(screenID)
+			screen, ok := a.screenByID(screenID)
 			if !ok {
 				return nil
 			}
@@ -637,8 +657,9 @@ func (a *Agent) apply(ctx context.Context, serial string, cmd schedule.Command) 
 	case schedule.KindStart:
 		started := a.now().UTC()
 		if a.air != nil {
-			screen, ok := a.cfg.ScreenByID(cmd.ScreenID)
-			if !ok {
+			screen, ok := a.screenByID(cmd.ScreenID)
+			if !ok || screen.StreamPort <= 0 {
+				a.log.Error("air start failed", "screen_id", cmd.ScreenID, "media_id", cmd.Entry.Media.ID, "reason", "no_stream_port")
 				return
 			}
 			if err := a.air.Start(ctx, air.StartReq{
@@ -648,7 +669,7 @@ func (a *Agent) apply(ctx context.Context, serial string, cmd schedule.Command) 
 				MediaID:  cmd.Entry.Media.ID,
 				Duration: cmd.Entry.Duration,
 			}); err != nil {
-				a.log.Error("air start failed", "screen_id", cmd.ScreenID, "media_id", cmd.Entry.Media.ID)
+				a.log.Error("air start failed", "screen_id", cmd.ScreenID, "media_id", cmd.Entry.Media.ID, "err", err.Error())
 				_ = a.air.Stop(ctx, serial, cmd.ScreenID)
 				return
 			}

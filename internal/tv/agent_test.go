@@ -10,13 +10,13 @@ import (
 
 func TestAgentStartStream(t *testing.T) {
 	var gotURL string
+	var gotBuf string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/start_stream" || r.Method != http.MethodPost {
 			t.Fatalf("%s %s", r.Method, r.URL.Path)
 		}
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		gotURL, _ = body["url"].(string)
+		gotURL = r.URL.Query().Get("url")
+		gotBuf = r.URL.Query().Get("buffer_ms")
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "url": gotURL})
 	}))
 	defer srv.Close()
@@ -24,8 +24,8 @@ func TestAgentStartStream(t *testing.T) {
 	if err := a.StartStream(context.Background(), "http://192.168.33.1:8091/", 300); err != nil {
 		t.Fatal(err)
 	}
-	if gotURL != "http://192.168.33.1:8091/" {
-		t.Fatalf("%q", gotURL)
+	if gotURL != "http://192.168.33.1:8091/" || gotBuf != "300" {
+		t.Fatalf("url=%q buffer_ms=%q", gotURL, gotBuf)
 	}
 }
 
