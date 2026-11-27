@@ -101,10 +101,10 @@ func TestScreenshotScreencap(t *testing.T) {
 func TestInstallAPK(t *testing.T) {
 	r := &recRunner{}
 	d := &Device{Serial: "1.2.3.4:5555", Runner: r}
-	if err := d.InstallAPK(context.Background(), "/home/stream/apk/voxel-debug.apk"); err != nil {
+	if err := d.InstallAPK(context.Background(), "/home/voxel/apk/voxel-debug.apk"); err != nil {
 		t.Fatal(err)
 	}
-	if !r.hasSubslice("install", "-r", "/home/stream/apk/voxel-debug.apk") {
+	if !r.hasSubslice("install", "-r", "/home/voxel/apk/voxel-debug.apk") {
 		t.Fatalf("%v", r.calls)
 	}
 }
@@ -189,10 +189,10 @@ func TestEnsurePackageInstalledSkipsWhenPresent(t *testing.T) {
 func TestEnsurePackageInstalledInstallsWhenMissing(t *testing.T) {
 	r := &recRunner{outErr: errors.New("exit status 1")}
 	d := &Device{Serial: "1.2.3.4:5555", Runner: r}
-	if err := d.EnsurePackageInstalled(context.Background(), VoxelPackage, "/home/stream/apk/voxel-debug.apk"); err != nil {
+	if err := d.EnsurePackageInstalled(context.Background(), VoxelPackage, "/home/voxel/apk/voxel-debug.apk"); err != nil {
 		t.Fatal(err)
 	}
-	if !r.hasSubslice("install", "-r", "/home/stream/apk/voxel-debug.apk") {
+	if !r.hasSubslice("install", "-r", "/home/voxel/apk/voxel-debug.apk") {
 		t.Fatalf("%v", r.calls)
 	}
 	if r.hasSubslice("am", "start") {
@@ -224,10 +224,10 @@ func TestEnsureAppInstallsWhenAgentDown(t *testing.T) {
 	r := &recRunner{}
 	d := &Device{Serial: "1.2.3.4:5555", Runner: r}
 	a := &Agent{BaseURL: srv.URL, HTTP: srv.Client()}
-	if err := d.EnsureApp(context.Background(), a, "/home/stream/apk/voxel-debug.apk"); err != nil {
+	if err := d.EnsureApp(context.Background(), a, "/home/voxel/apk/voxel-debug.apk"); err != nil {
 		t.Fatal(err)
 	}
-	if !r.hasSubslice("install", "-r", "/home/stream/apk/voxel-debug.apk") {
+	if !r.hasSubslice("install", "-r", "/home/voxel/apk/voxel-debug.apk") {
 		t.Fatalf("install %v", r.calls)
 	}
 	if !r.hasSubslice("am", "start", "-n", "com.voxel.mediastream/.MainActivity") {
