@@ -46,11 +46,13 @@ func TestPortServesFIFOBytes(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() {
 		resp, err := http.Get(url)
+		if resp != nil {
+			defer resp.Body.Close()
+		}
 		if err != nil {
 			errCh <- err
 			return
 		}
-		defer resp.Body.Close()
 		if ct := resp.Header.Get("Content-Type"); ct != "video/mp2t" {
 			errCh <- fmt.Errorf("content-type=%s", ct)
 			return
@@ -109,20 +111,24 @@ func TestPortFanOutAndDropSlowClient(t *testing.T) {
 	go func() {
 		defer close(slowDone)
 		resp, err := http.Get(url)
+		if resp != nil {
+			defer resp.Body.Close()
+		}
 		if err != nil {
 			return
 		}
-		defer resp.Body.Close()
 		time.Sleep(500 * time.Millisecond)
 	}()
 
 	fastGot := make(chan []byte, 1)
 	go func() {
 		resp, err := http.Get(url)
+		if resp != nil {
+			defer resp.Body.Close()
+		}
 		if err != nil {
 			return
 		}
-		defer resp.Body.Close()
 		buf := make([]byte, 188)
 		n, _ := io.ReadFull(resp.Body, buf)
 		fastGot <- buf[:n]

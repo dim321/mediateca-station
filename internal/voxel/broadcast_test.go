@@ -151,11 +151,15 @@ func TestManagerBuiltinStartsHTTP(t *testing.T) {
 	}
 	defer func() { _ = m.Stop(port) }()
 
-	resp, err := http.Get("http://127.0.0.1:" + strconv.Itoa(port) + "/")
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(port)+"/", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
 	if resp.Header.Get("Content-Type") != "video/mp2t" {
 		t.Fatalf("content-type=%s", resp.Header.Get("Content-Type"))
 	}
