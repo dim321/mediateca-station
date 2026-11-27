@@ -9,9 +9,10 @@ import (
 )
 
 type recRunner struct {
-	calls [][]string
-	out   []byte
-	err   error
+	calls  [][]string
+	out    []byte
+	err    error // Run
+	outErr error // RunOut
 }
 
 func (r *recRunner) Run(ctx context.Context, argv ...string) error {
@@ -23,8 +24,8 @@ func (r *recRunner) Run(ctx context.Context, argv ...string) error {
 func (r *recRunner) RunOut(ctx context.Context, argv ...string) ([]byte, error) {
 	cp := append([]string{}, argv...)
 	r.calls = append(r.calls, cp)
-	if r.err != nil {
-		return nil, r.err
+	if r.outErr != nil {
+		return r.out, r.outErr
 	}
 	if r.out != nil {
 		return r.out, nil
@@ -150,6 +151,52 @@ func TestWakeCallsWOLWhenStillAsleep(t *testing.T) {
 	}
 	if wolMAC != "78:53:33:4b:2c:29" {
 		t.Fatalf("wol %q", wolMAC)
+	}
+}
+
+func TestPackageInstalledTrue(t *testing.T) {
+	r := &recRunner{out: []byte("package:/data/app/com.voxel.mediastream-1/base.apk\n")}
+	d := &Device{Serial: "1.2.3.4:5555", Runner: r}
+	ok, err := d.PackageInstalled(context.Background(), VoxelPackage)
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	if !r.hasSubslice("pm", "path", VoxelPackage) {
+		t.Fatalf("%v", r.calls)
+	}
+}
+
+func TestPackageInstalledFalse(t *testing.T) {
+	r := &recRunner{outErr: errors.New("exit status 1")}
+	d := &Device{Serial: "1.2.3.4:5555", Runner: r}
+	ok, err := d.PackageInstalled(context.Background(), VoxelPackage)
+	if err != nil || ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+}
+
+func TestEnsurePackageInstalledSkipsWhenPresent(t *testing.T) {
+	r := &recRunner{out: []byte("package:/data/app/x.apk\n")}
+	d := &Device{Serial: "1.2.3.4:5555", Runner: r}
+	if err := d.EnsurePackageInstalled(context.Background(), VoxelPackage, "/apk/x.apk"); err != nil {
+		t.Fatal(err)
+	}
+	if r.hasSubslice("install") {
+		t.Fatalf("unexpected install %v", r.calls)
+	}
+}
+
+func TestEnsurePackageInstalledInstallsWhenMissing(t *testing.T) {
+	r := &recRunner{outErr: errors.New("exit status 1")}
+	d := &Device{Serial: "1.2.3.4:5555", Runner: r}
+	if err := d.EnsurePackageInstalled(context.Background(), VoxelPackage, "/home/stream/apk/voxel-debug.apk"); err != nil {
+		t.Fatal(err)
+	}
+	if !r.hasSubslice("install", "-r", "/home/stream/apk/voxel-debug.apk") {
+		t.Fatalf("%v", r.calls)
+	}
+	if r.hasSubslice("am", "start") {
+		t.Fatalf("must not launch on ensure package: %v", r.calls)
 	}
 }
 

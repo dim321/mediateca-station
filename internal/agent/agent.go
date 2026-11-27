@@ -83,6 +83,9 @@ type Agent struct {
 	cmdExec           commandRunner
 	leaseFile         leases.File
 	startedAt         time.Time
+	// ensureDiscoveredTV installs Voxel APK on a TV found by fetch_screens (ip without :port).
+	// Nil uses adb against ip:5555. Failures are logged; they do not fail discovery.
+	ensureDiscoveredTV func(ctx context.Context, ip, apk string) error
 
 	stateMu      sync.RWMutex
 	doneMu       sync.Mutex
@@ -155,7 +158,13 @@ func newAgent(cfg config.File, h Hub, p Player, log *slog.Logger) (*Agent, error
 		if err := os.MkdirAll(cfg.FifoDir, 0o700); err != nil {
 			return nil, err
 		}
-		vm := &voxel.Manager{Bin: cfg.BroadcastBin, FifoDir: cfg.FifoDir, DataDir: cfg.DataDir}
+		vm := &voxel.Manager{
+			Bin:     cfg.BroadcastBin,
+			FifoDir: cfg.FifoDir,
+			DataDir: cfg.DataDir,
+			Bind:    cfg.BroadcastBind,
+			Builtin: cfg.UseBuiltinStreamer(),
+		}
 		a.voxel = vm
 		ctrl := &air.Controller{
 			Pace:      cfg.FeederPace,
@@ -406,7 +415,11 @@ func (a *Agent) runCommands(ctx context.Context, cmds []hub.Command) {
 			continue
 		}
 		if cmd.Type == "fetch_screens" {
-			results = append(results, commands.FetchScreens(cmd, a.leaseFile.Active, a.now()))
+			res := commands.FetchScreens(cmd, a.leaseFile.Active, a.now())
+			if res.OK && res.Result != nil {
+				a.ensureVoxelOnScreens(ctx, res.Result.Screens)
+			}
+			results = append(results, res)
 			continue
 		}
 		results = append(results, exec.Run(ctx, cmd))
@@ -436,6 +449,34 @@ func commandIDs(results []hub.CommandResult) []string {
 		ids[i] = res.CommandID
 	}
 	return ids
+}
+
+func (a *Agent) ensureVoxelOnScreens(ctx context.Context, screens []hub.ScreenEndpoint) {
+	apk := a.cfg.VoxelAPK
+	if apk == "" || len(screens) == 0 {
+		return
+	}
+	ensure := a.ensureDiscoveredTV
+	if ensure == nil {
+		ensure = defaultEnsureDiscoveredTV
+	}
+	for _, screen := range screens {
+		if screen.IPAddress == "" {
+			continue
+		}
+		if err := ensure(ctx, screen.IPAddress, apk); err != nil {
+			a.log.Error("fetch_screens ensure voxel apk", "ip", screen.IPAddress, "err", err.Error())
+		}
+	}
+}
+
+func defaultEnsureDiscoveredTV(ctx context.Context, ip, apk string) error {
+	serial := ip
+	if !strings.Contains(ip, ":") {
+		serial = net.JoinHostPort(ip, "5555")
+	}
+	d := &tv.Device{Serial: serial, Runner: tv.ExecRunner{}}
+	return d.EnsurePackageInstalled(ctx, tv.VoxelPackage, apk)
 }
 
 func (a *Agent) commandAlreadyDone(id string) bool {

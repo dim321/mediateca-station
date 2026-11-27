@@ -26,6 +26,22 @@ if printf '%s\n' "$cfg" | grep -q '^screens:'; then
   fail "deploy config must not list screens"
 fi
 printf '%s\n' "$cfg" | grep -qx 'broadcast_bind: "192.168.33.1"' || fail "bind"
+printf '%s\n' "$cfg" | grep -qx 'stream_backend: "builtin"' || fail "stream_backend"
+if printf '%s\n' "$cfg" | grep -q '^broadcast_bin:'; then
+  fail "deploy config must not require broadcast_bin"
+fi
+printf '%s\n' "$cfg" | grep -qx 'voxel_apk: "/home/stream/apk/voxel-debug.apk"' || fail "voxel_apk path"
+
+fake_root=$(mktemp -d)
+mkdir -p "$fake_root/deploy"
+if require_repo_apk "$fake_root" >/dev/null 2>"$tmp/apk-err"; then
+  fail "require_repo_apk must fail without deploy/voxel-debug.apk"
+fi
+grep -q 'deploy/voxel-debug.apk' "$tmp/apk-err" || fail "missing apk error text"
+printf 'apk' >"$fake_root/deploy/voxel-debug.apk"
+got_apk=$(require_repo_apk "$fake_root") || fail "require_repo_apk with file"
+[ "$got_apk" = "$fake_root/deploy/voxel-debug.apk" ] || fail "apk path: $got_apk"
+rm -rf "$fake_root"
 
 hosts=$(printf '%s\n' '127.0.0.1 localhost' '1.2.3.4 broadcast.mediateca.store' | render_hosts_file)
 printf '%s\n' "$hosts" | grep -qx '127.0.0.1 localhost' || fail "localhost dropped"

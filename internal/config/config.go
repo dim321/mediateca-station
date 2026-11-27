@@ -28,6 +28,7 @@ type File struct {
 	DataDir       string
 	BroadcastBind string
 	BroadcastBin  string
+	StreamBackend string // "builtin" | "voxel_bin" | "" (legacy: BroadcastBin ⇒ voxel_bin)
 	FifoDir       string
 	VoxelAPK      string
 	ChunkSize     int
@@ -35,8 +36,31 @@ type File struct {
 	Screens       []Screen
 }
 
+// VoxelPath is the production air path (stream ports + Voxel APK), as opposed to lab httpmedia+VLC.
 func (f File) VoxelPath() bool {
-	return f.BroadcastBin != ""
+	switch f.StreamBackend {
+	case "builtin", "voxel_bin":
+		return true
+	case "":
+		return f.BroadcastBin != ""
+	default:
+		return false
+	}
+}
+
+// UseBuiltinStreamer reports whether production air uses the in-process HTTP streamer.
+func (f File) UseBuiltinStreamer() bool {
+	if !f.VoxelPath() {
+		return false
+	}
+	if f.StreamBackend == "builtin" {
+		return true
+	}
+	if f.StreamBackend == "voxel_bin" {
+		return false
+	}
+	// Empty backend with BroadcastBin: legacy external binary.
+	return false
 }
 
 func (f File) Serial(screenID int) (string, bool) {
@@ -75,6 +99,7 @@ type fileYAML struct {
 	DataDir       string       `yaml:"data_dir"`
 	BroadcastBind string       `yaml:"broadcast_bind"`
 	BroadcastBin  string       `yaml:"broadcast_bin"`
+	StreamBackend string       `yaml:"stream_backend"`
 	FifoDir       string       `yaml:"fifo_dir"`
 	VoxelAPK      string       `yaml:"voxel_apk"`
 	ChunkSize     int          `yaml:"chunk_size"`
@@ -116,6 +141,7 @@ func Load(path string) (File, error) {
 		DataDir:       doc.DataDir,
 		BroadcastBind: doc.BroadcastBind,
 		BroadcastBin:  doc.BroadcastBin,
+		StreamBackend: doc.StreamBackend,
 		FifoDir:       doc.FifoDir,
 		VoxelAPK:      doc.VoxelAPK,
 		ChunkSize:     18800,
@@ -172,7 +198,10 @@ func (f *File) validate(doc fileYAML) error {
 		return fmt.Errorf("data_dir is required")
 	}
 
-	voxel := f.BroadcastBin != ""
+	if f.StreamBackend != "" && f.StreamBackend != "builtin" && f.StreamBackend != "voxel_bin" {
+		return fmt.Errorf("stream_backend must be builtin or voxel_bin")
+	}
+	voxel := f.VoxelPath()
 	if !voxel && len(doc.Screens) == 0 {
 		return fmt.Errorf("at least one screen is required")
 	}
@@ -185,6 +214,9 @@ func (f *File) validate(doc fileYAML) error {
 		}
 		if f.VoxelAPK == "" {
 			return fmt.Errorf("voxel_apk is required")
+		}
+		if !f.UseBuiltinStreamer() && f.BroadcastBin == "" {
+			return fmt.Errorf("broadcast_bin is required when stream_backend is voxel_bin")
 		}
 	} else {
 		if _, _, err := net.SplitHostPort(f.HTTPListen); err != nil {

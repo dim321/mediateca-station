@@ -10,9 +10,10 @@ Proof of play is `POST /api/agent/v1/play_events`.
 **Lab (VLC):** serve clips over HTTP and open them in VLC via ADB — see
 [Television](#television) and [Mini-PC](#mini-pc).
 
-**Production (`media-voxel`):** feed per-screen FIFOs through the Voxel
-`broadcast` binary and drive the Voxel APK agent on each TV (`:8989`). No VLC
-and no clip HTTP server — see [Voxel production path](#voxel-production-path).
+**Production:** in-process MPEG-TS HTTP streamer (`stream_backend: builtin`)
+feeds each TV’s Voxel APK agent (`:8989`). No external `/home/stream/bin/broadcast`
+is required on a clean install. Legacy `broadcast_bin` / `stream_backend: voxel_bin`
+still works — see [Voxel production path](#voxel-production-path).
 
 ## Television
 
@@ -96,9 +97,50 @@ sudo systemctl enable --now mediateca-station
 
 ## Voxel production path
 
-Use this on the location mini-PC (`media-voxel`) when `broadcast_bin` is set in
-config. Station owns the air timeline: Hub schedule → feeder → FIFO →
-`broadcast` → TV APK. Do not run the legacy Voxel air stack in parallel.
+Use this on the location mini-PC. Station owns the air timeline:
+Hub schedule → feeder → FIFO → built-in HTTP streamer (or legacy `broadcast`) →
+TV APK. Do not run the legacy Voxel air stack in parallel.
+
+### Clean install (built-in streamer)
+
+Default for new stations. No `/home/stream/bin/broadcast` on disk.
+
+1. Install `adb`, an NTP client (`chrony` or `systemd-timesyncd`), and the
+   systemd unit as in [Mini-PC](#mini-pc). Fleet script
+   `deploy/install-stations.sh` also ensures `dnsmasq` and a WOL utility when
+   missing, and copies `deploy/voxel-debug.apk` from the repo to
+   `/home/stream/apk/voxel-debug.apk` (hard-fail if the file is missing in the
+   repo). TVs may be offline at install time — the script does **not**
+   `adb install` onto TVs.
+2. When TVs join eth0 and Hub sends `fetch_screens`, station reports leases
+   and installs the Voxel APK on each discovered TV if `com.voxel.mediastream`
+   is not present yet.
+3. Write production YAML with `stream_backend: builtin` and **without**
+   `broadcast_bin`.
+
+```yaml
+hub_base_url: "https://hub.example"
+agent_token: "<token>"
+late_threshold: "2s"
+poll_interval: "1m"
+data_dir: "/var/lib/mediateca-station"
+
+broadcast_bind: "192.168.33.1"
+stream_backend: "builtin"
+fifo_dir: "/var/lib/mediateca-station/fifo"
+voxel_apk: "/home/stream/apk/voxel-debug.apk"
+chunk_size: 18800
+feeder_pace: "realtime"
+
+screens:
+  - screen_id: 7
+    adb_serial: "192.168.33.182:5555"
+    stream_port: 8091
+    mac: "78:53:33:4b:2c:29"
+```
+
+`http_listen` / `http_secret` are lab-only — omit them on production.
+Stream URL per screen: `http://<broadcast_bind>:<stream_port>/`.
 
 ### Retire conflicting Voxel services
 
@@ -122,8 +164,6 @@ sudo grep -r broadcast /etc/systemd/system /lib/systemd/system 2>/dev/null | hea
 ps aux | grep -E 'start_broadcast|/usr/local/bin/broadcast' | grep -v grep
 
 sudo systemctl restart mediateca-station
-ps -o user,pid,ppid,cmd -C broadcast
-
 ```
 
 Do not run the host `controller` for air. If the old stack reads Hub
@@ -142,41 +182,29 @@ VLC is not used on this path.
 
 ### Config
 
-Required YAML keys: `broadcast_bind`, `broadcast_bin`, `fifo_dir`, `voxel_apk`.
+Required YAML keys: `broadcast_bind`, `fifo_dir`, `voxel_apk`, and either
+`stream_backend: builtin` or a legacy `broadcast_bin` /
+`stream_backend: voxel_bin`.
 Each screen needs `screen_id`, `adb_serial` (`host:port`), and a unique
 `stream_port`. Optional: `chunk_size`, `feeder_pace`, per-screen `mac` (M2
 power/wake).
 
-`http_listen` and `http_secret` are **not** required when `broadcast_bin` is
-set; omit them on `media-voxel`. The stream URL for a screen is
-`http://<broadcast_bind>:<stream_port>/`.
+Ensure `fifo_dir` is writable by `mediateca`, and TVs can reach
+`broadcast_bind` on each `stream_port`.
 
-Example (matches the Voxel integration spec):
+### Legacy external `broadcast` binary
+
+Existing sites may keep:
 
 ```yaml
-hub_base_url: "https://hub.example"
-agent_token: "<token>"
-late_threshold: "2s"
-poll_interval: "1m"
-data_dir: "/var/lib/mediateca-station"
-
 broadcast_bind: "192.168.33.1"
 broadcast_bin: "/home/stream/bin/broadcast"
 fifo_dir: "/tmp"
 voxel_apk: "/home/stream/apk/voxel-debug.apk"
-chunk_size: 18800
-feeder_pace: "realtime"
-
-screens:
-  - screen_id: 7
-    adb_serial: "192.168.33.182:5555"
-    stream_port: 8091
-    mac: "78:53:33:4b:2c:29"
 ```
 
-Install the binary, systemd unit, and `adb` access as in [Mini-PC](#mini-pc).
-Ensure `broadcast_bin` exists, `fifo_dir` is writable by `mediateca`, and TVs
-can reach `broadcast_bind` on each `stream_port`.
+Or set `stream_backend: voxel_bin` with `broadcast_bin` set. Prefer migrating
+to `stream_backend: builtin` and removing the external binary.
 
 ### Smoke test on media-voxel
 
@@ -262,9 +290,13 @@ the existing play reporter). Air from cache continues.
 ### Station command: `fetch_screens`
 
 Hub sends `fetch_screens` with `screen_id: null` and empty `params`. The
-operator starts screen discovery on the Hub. Station does not start ADB, VLC,
-or a screen stream for this command. It reads active DHCP leases and posts
-`command_results`.
+operator starts screen discovery on the Hub. Station does not start VLC or a
+screen stream for this command. It reads active DHCP leases, posts
+`command_results` with MAC/IP pairs, and for each discovered IP tries
+`adb connect <ip>:5555` then installs `voxel_apk` if
+`com.voxel.mediastream` is missing (`pm path`). ADB/install failures are
+logged and do not fail the discovery result. Static DHCP (`dnsmasq.static`)
+is left to site admins — station does not rewrite it.
 
 The process needs read access to `/var/lib/misc/dnsmasq.leases`. Do not run
 the agent as root for this file. Do not make the lease file world-readable
