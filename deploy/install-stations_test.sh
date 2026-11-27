@@ -26,6 +26,11 @@ if printf '%s\n' "$cfg" | grep -q '^screens:'; then
   fail "deploy config must not list screens"
 fi
 printf '%s\n' "$cfg" | grep -qx 'broadcast_bind: "192.168.33.1"' || fail "bind"
+printf '%s\n' "$cfg" | grep -qx 'stream_backend: "builtin"' || fail "stream_backend"
+if printf '%s\n' "$cfg" | grep -q '^broadcast_bin:'; then
+  fail "deploy config must not require broadcast_bin"
+fi
+printf '%s\n' "$cfg" | grep -qx 'voxel_apk: "/home/stream/apk/voxel-debug.apk"' || fail "voxel_apk path"
 
 hosts=$(printf '%s\n' '127.0.0.1 localhost' '1.2.3.4 broadcast.mediateca.store' | render_hosts_file)
 printf '%s\n' "$hosts" | grep -qx '127.0.0.1 localhost' || fail "localhost dropped"

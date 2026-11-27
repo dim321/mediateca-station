@@ -170,4 +170,109 @@ screens:
 	if cfg.VoxelPath() {
 		t.Fatal("lab must not be Voxel path")
 	}
+	if cfg.UseBuiltinStreamer() {
+		t.Fatal("lab must not use builtin streamer")
+	}
+}
+
+func TestLoadBuiltinStreamer(t *testing.T) {
+	body := `
+hub_base_url: "https://hub.example"
+agent_token: "token"
+data_dir: "/var/lib/mediateca-station"
+broadcast_bind: "192.168.33.1"
+stream_backend: "builtin"
+fifo_dir: "/tmp"
+voxel_apk: "/home/stream/apk/voxel-debug.apk"
+screens:
+  - screen_id: 7
+    adb_serial: "192.168.33.182:5555"
+    stream_port: 8091
+`
+	cfg, err := Load(writeConfig(t, body, 0o600))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.VoxelPath() {
+		t.Fatal("expected production path")
+	}
+	if !cfg.UseBuiltinStreamer() {
+		t.Fatal("expected builtin streamer")
+	}
+	if cfg.BroadcastBin != "" {
+		t.Fatalf("broadcast_bin should be empty, got %q", cfg.BroadcastBin)
+	}
+}
+
+func TestLoadBuiltinAllowsEmptyScreens(t *testing.T) {
+	body := `
+hub_base_url: "https://hub.example"
+agent_token: "token"
+data_dir: "/var/lib/mediateca-station"
+broadcast_bind: "192.168.33.1"
+stream_backend: "builtin"
+fifo_dir: "/tmp"
+voxel_apk: "/home/stream/apk/voxel-debug.apk"
+`
+	cfg, err := Load(writeConfig(t, body, 0o600))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.VoxelPath() || !cfg.UseBuiltinStreamer() || len(cfg.Screens) != 0 {
+		t.Fatalf("%+v", cfg)
+	}
+}
+
+func TestLoadVoxelBinRequiresBroadcastBin(t *testing.T) {
+	body := `
+hub_base_url: "https://hub.example"
+agent_token: "token"
+data_dir: "/var/lib/mediateca-station"
+broadcast_bind: "192.168.33.1"
+stream_backend: "voxel_bin"
+fifo_dir: "/tmp"
+voxel_apk: "/home/stream/apk/voxel-debug.apk"
+`
+	_, err := Load(writeConfig(t, body, 0o600))
+	if err == nil || !strings.Contains(err.Error(), "broadcast_bin") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestLoadRejectsInvalidStreamBackend(t *testing.T) {
+	body := `
+hub_base_url: "https://hub.example"
+agent_token: "token"
+data_dir: "/var/lib/mediateca-station"
+broadcast_bind: "192.168.33.1"
+stream_backend: "ffmpeg"
+fifo_dir: "/tmp"
+voxel_apk: "/home/stream/apk/voxel-debug.apk"
+`
+	_, err := Load(writeConfig(t, body, 0o600))
+	if err == nil || !strings.Contains(err.Error(), "stream_backend") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestLegacyBroadcastBinStillVoxelPath(t *testing.T) {
+	body := `
+hub_base_url: "https://hub.example"
+agent_token: "token"
+data_dir: "/var/lib/mediateca-station"
+broadcast_bind: "192.168.33.1"
+broadcast_bin: "/home/stream/bin/broadcast"
+fifo_dir: "/tmp"
+voxel_apk: "/home/stream/apk/voxel-debug.apk"
+`
+	cfg, err := Load(writeConfig(t, body, 0o600))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.VoxelPath() {
+		t.Fatal("legacy broadcast_bin must be production path")
+	}
+	if cfg.UseBuiltinStreamer() {
+		t.Fatal("legacy must not use builtin")
+	}
 }

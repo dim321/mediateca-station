@@ -3,9 +3,13 @@ package voxel
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"testing"
@@ -124,6 +128,70 @@ func TestOpenFifoWithoutReaderUsesHold(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = f.Close()
+}
+
+func TestManagerBuiltinStartsHTTP(t *testing.T) {
+	dir := t.TempDir()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	m := &Manager{
+		FifoDir: dir,
+		DataDir: dir,
+		Bind:    "127.0.0.1",
+		Builtin: true,
+	}
+	ctx := context.Background()
+	if err := m.Ensure(ctx, port); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = m.Stop(port) }()
+
+	resp, err := http.Get("http://127.0.0.1:" + strconv.Itoa(port) + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.Header.Get("Content-Type") != "video/mp2t" {
+		t.Fatalf("content-type=%s", resp.Header.Get("Content-Type"))
+	}
+
+	payload := []byte{0x47, 0x1f, 0xff, 0x10}
+	w, err := m.OpenFifo(port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+
+	buf := make([]byte, len(payload))
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.ReadFull(resp.Body, buf)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout reading stream")
+	}
+	if string(buf) != string(payload) {
+		t.Fatalf("got %v", buf)
+	}
+
+	// Ensure is idempotent while running.
+	if err := m.Ensure(ctx, port); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestOpenFifoWithReaderSucceeds(t *testing.T) {

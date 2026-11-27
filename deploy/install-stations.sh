@@ -7,6 +7,7 @@ HUB_BASE_URL=https://broadcast.mediateca.store
 SSH_USER=voxel
 SSH_PORT=5956
 TAB=$(printf '\t')
+DEFAULT_VOXEL_APK=/home/stream/apk/voxel-debug.apk
 
 validate_token() {
 	token=$1
@@ -60,9 +61,9 @@ late_threshold: "2s"
 poll_interval: "1m"
 data_dir: "/var/lib/mediateca-station"
 broadcast_bind: "192.168.33.1"
-broadcast_bin: "/home/stream/bin/broadcast"
+stream_backend: "builtin"
 fifo_dir: "/var/lib/mediateca-station/fifo"
-voxel_apk: "/home/stream/apk/voxel-debug.apk"
+voxel_apk: "$DEFAULT_VOXEL_APK"
 chunk_size: 18800
 feeder_pace: "realtime"
 EOF
@@ -98,6 +99,100 @@ WantedBy=multi-user.target
 EOF
 }
 
+# Remote setup script: packages + dirs. APK absence is a warning only.
+remote_setup_script() {
+	cat <<'EOF'
+set -eu
+
+apt_install() {
+	pkg=$1
+	if command -v apt-get >/dev/null 2>&1; then
+		export DEBIAN_FRONTEND=noninteractive
+		apt-get install -y "$pkg"
+		return
+	fi
+	echo "cannot install $pkg: no apt-get" >&2
+	return 1
+}
+
+need_cmd() {
+	cmd=$1
+	pkg=$2
+	if command -v "$cmd" >/dev/null 2>&1; then
+		echo "ok: $cmd"
+		return 0
+	fi
+	echo "installing $pkg (provides $cmd)"
+	apt_install "$pkg"
+	command -v "$cmd" >/dev/null 2>&1
+}
+
+echo "==> deps: systemctl"
+if ! command -v systemctl >/dev/null 2>&1; then
+	echo "systemctl not found; systemd is required" >&2
+	exit 1
+fi
+
+echo "==> deps: adb"
+need_cmd adb adb || need_cmd adb android-tools-adb || {
+	echo "adb is required in PATH" >&2
+	exit 1
+}
+
+echo "==> deps: wake-on-lan"
+if command -v wakeonlan >/dev/null 2>&1 || command -v etherwake >/dev/null 2>&1; then
+	echo "ok: wol utility present"
+else
+	apt_install wakeonlan 2>/dev/null || apt_install etherwake 2>/dev/null || true
+	if command -v wakeonlan >/dev/null 2>&1 || command -v etherwake >/dev/null 2>&1; then
+		echo "ok: wol utility installed"
+	else
+		echo "warn: neither wakeonlan nor etherwake available (WOL optional)" >&2
+	fi
+fi
+
+echo "==> deps: dnsmasq"
+if command -v dnsmasq >/dev/null 2>&1 || dpkg -s dnsmasq >/dev/null 2>&1; then
+	echo "ok: dnsmasq package present (not rewriting site config)"
+else
+	apt_install dnsmasq
+fi
+getent group dnsmasq-leases >/dev/null || groupadd --system dnsmasq-leases
+if [ -f /var/lib/misc/dnsmasq.leases ]; then
+	chgrp dnsmasq-leases /var/lib/misc/dnsmasq.leases 2>/dev/null || true
+	chmod 640 /var/lib/misc/dnsmasq.leases 2>/dev/null || true
+fi
+
+echo "==> deps: NTP client"
+if systemctl list-unit-files chrony.service chronyd.service systemd-timesyncd.service 2>/dev/null | grep -q enabled || \
+	systemctl is-active --quiet chrony chronyd systemd-timesyncd 2>/dev/null || \
+	command -v chronyd >/dev/null 2>&1 || command -v chronyc >/dev/null 2>&1; then
+	echo "ok: NTP client present"
+else
+	if apt_install chrony; then
+		systemctl enable --now chrony 2>/dev/null || systemctl enable --now chronyd 2>/dev/null || true
+		echo "ok: chrony installed"
+	else
+		echo "warn: could not install chrony; ensure an NTP client is running" >&2
+	fi
+fi
+
+echo "==> user and dirs"
+if ! getent passwd mediateca >/dev/null; then
+	useradd --system --create-home --home-dir /var/lib/mediateca-station mediateca
+fi
+usermod -a -G dnsmasq-leases mediateca 2>/dev/null || true
+install -d -m 0700 -o mediateca -g mediateca /var/lib/mediateca-station
+install -d -m 0700 -o mediateca -g mediateca /var/lib/mediateca-station/fifo
+install -d -m 0750 /etc/mediateca-station
+
+VOXEL_APK="/home/stream/apk/voxel-debug.apk"
+if [ ! -f "$VOXEL_APK" ]; then
+	echo "warn: Voxel APK not found at $VOXEL_APK — place the file later; ensure_app will need it" >&2
+fi
+EOF
+}
+
 install_one() {
 	ip=$1
 	token=$2
@@ -106,18 +201,7 @@ install_one() {
 
 	echo "==> $ip ($SSH_USER): setup"
 	stage=setup
-	if ! ssh $ssh_opts "${SSH_USER}@${ip}" sudo bash -s <<'EOF'
-set -eu
-getent group dnsmasq-leases >/dev/null || groupadd --system dnsmasq-leases
-if ! getent passwd mediateca >/dev/null; then
-	useradd --system --create-home --home-dir /var/lib/mediateca-station mediateca
-fi
-usermod -a -G dnsmasq-leases mediateca 2>/dev/null || true
-install -d -m 0700 -o mediateca -g mediateca /var/lib/mediateca-station
-install -d -m 0700 -o mediateca -g mediateca /var/lib/mediateca-station/fifo
-install -d -m 0750 /etc/mediateca-station
-EOF
-	then
+	if ! remote_setup_script | ssh $ssh_opts "${SSH_USER}@${ip}" sudo bash -s; then
 		echo "failed $ip $stage" >&2
 		return 1
 	fi

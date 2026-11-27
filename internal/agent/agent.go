@@ -155,7 +155,13 @@ func newAgent(cfg config.File, h Hub, p Player, log *slog.Logger) (*Agent, error
 		if err := os.MkdirAll(cfg.FifoDir, 0o700); err != nil {
 			return nil, err
 		}
-		vm := &voxel.Manager{Bin: cfg.BroadcastBin, FifoDir: cfg.FifoDir, DataDir: cfg.DataDir}
+		vm := &voxel.Manager{
+			Bin:     cfg.BroadcastBin,
+			FifoDir: cfg.FifoDir,
+			DataDir: cfg.DataDir,
+			Bind:    cfg.BroadcastBind,
+			Builtin: cfg.UseBuiltinStreamer(),
+		}
 		a.voxel = vm
 		ctrl := &air.Controller{
 			Pace:      cfg.FeederPace,

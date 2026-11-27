@@ -11,6 +11,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"mediateca-station/internal/stream"
 )
 
 const fifoOpenTimeout = 5 * time.Second
@@ -92,10 +94,13 @@ type Manager struct {
 	Bin     string
 	FifoDir string
 	DataDir string
+	Bind    string // broadcast_bind; required for Builtin
+	Builtin bool   // in-process streamer instead of exec BroadcastBin
 	Runner  Runner
 
-	mu    sync.Mutex
-	procs map[int]Process // port → process
+	mu        sync.Mutex
+	procs     map[int]Process      // port → process (legacy voxel_bin)
+	streamers map[int]*stream.Port // port → builtin streamer
 }
 
 func (m *Manager) FifoPath(port int) string {
@@ -105,6 +110,36 @@ func (m *Manager) FifoPath(port int) string {
 func (m *Manager) Ensure(ctx context.Context, port int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.Builtin {
+		return m.ensureBuiltin(ctx, port)
+	}
+	return m.ensureExec(ctx, port)
+}
+
+func (m *Manager) ensureBuiltin(ctx context.Context, port int) error {
+	if m.streamers == nil {
+		m.streamers = map[int]*stream.Port{}
+	}
+	if p, ok := m.streamers[port]; ok && p.Running() {
+		return nil
+	}
+	if old, ok := m.streamers[port]; ok {
+		_ = old.Stop()
+		delete(m.streamers, port)
+	}
+	if m.Bind == "" {
+		return fmt.Errorf("broadcast_bind is required for builtin streamer")
+	}
+	fifo := m.FifoPath(port)
+	p, err := stream.Start(ctx, m.Bind, port, fifo)
+	if err != nil {
+		return err
+	}
+	m.streamers[port] = p
+	return nil
+}
+
+func (m *Manager) ensureExec(ctx context.Context, port int) error {
 	if m.procs == nil {
 		m.procs = map[int]Process{}
 	}
@@ -141,6 +176,13 @@ func (m *Manager) Ensure(ctx context.Context, port int) error {
 func (m *Manager) Stop(port int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.Builtin {
+		if p, ok := m.streamers[port]; ok {
+			_ = p.Stop()
+			delete(m.streamers, port)
+		}
+		return nil
+	}
 	p, ok := m.procs[port]
 	if !ok {
 		return nil
@@ -157,10 +199,21 @@ func (m *Manager) OpenFifo(port int) (*os.File, error) {
 		return f, nil
 	}
 	m.mu.Lock()
-	p := m.procs[port]
+	builtin := m.Builtin
+	var running bool
 	bin := m.Bin
+	if builtin {
+		if p := m.streamers[port]; p != nil {
+			running = p.Running()
+		}
+	} else if p := m.procs[port]; p != nil {
+		running = p.Running()
+	}
 	m.mu.Unlock()
-	if p != nil && !p.Running() {
+	if !running {
+		if builtin {
+			return nil, fmt.Errorf("open %s: builtin streamer on :%d is not running: %w", path, port, err)
+		}
 		return nil, fmt.Errorf("open %s: broadcast on :%d exited (bin=%s): %w", path, port, bin, err)
 	}
 	if errors.Is(err, syscall.ENXIO) {
